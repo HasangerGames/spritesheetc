@@ -1,0 +1,15 @@
+[submodule "vendored/rectpack2D"]
+	path = vendored/rectpack2D
+	url = https://github.com/TeamHypersomnia/rectpack2D.git
+[submodule "vendored/resvg"]
+	path = vendored/resvg
+	url = https://github.com/linebender/resvg.git
+[submodule "vendored/libwebp"]
+	path = vendored/libwebp
+	url = https://chromium.googlesource.com/webm/libwebp
+[submodule "vendored/glaze"]
+	path = vendored/glaze
+	url = https://github.com/stephenberry/glaze.git
+[submodule "vendored/basis_universal"]
+	path = vendored/basis_universal
+	url = https://github.com/BinomialLLC/basis_universal.git
