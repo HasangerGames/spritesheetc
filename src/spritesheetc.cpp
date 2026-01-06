@@ -267,6 +267,47 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         throw SpritesheetBuilderException("Output path does not exist or is not a directory: " + config.outputDirectory);
     }
 
+    std::vector<std::thread> threadPool;
+    uint16_t numThreads = config.builderThreads == 0
+        ? std::max(1u, std::thread::hardware_concurrency())
+        : config.builderThreads;
+    threadPool.reserve(numThreads);
+
+    auto job = [&](size_t numItems, const std::function<void(size_t idx)>& exec) {
+        threadPool.clear();
+        std::atomic<size_t> numFinishedItems = 0;
+        for (uint16_t i = 0; i < numThreads; ++i) {
+            threadPool.emplace_back([&] {
+                while (true) {
+                    size_t idx = numFinishedItems.fetch_add(1, std::memory_order::relaxed);
+                    if (idx >= numItems) break;
+
+                    exec(idx);
+                }
+            });
+        }
+        for (std::thread& thread : threadPool) thread.join();
+    };
+
+    size_t numInputFiles = config.inputFiles.size();
+
+    // Step 1: Render sprites
+    Timer renderSprites;
+    std::vector<Sprite> sprites{numInputFiles};
+    resvg_options* opt = resvg_options_create();
+    job(numInputFiles, [&](size_t idx) {
+        sprites[idx].data = renderSprite(config.inputFiles[idx], opt, config);
+    });
+    resvg_options_destroy(opt);
+    renderSprites.stop(std::format("[spritesheetc] {} sprites rendered", numInputFiles), config.logStatus);
+
+    // Step 2: Pack sprites into atlases
+    Timer pack;
+    std::vector<Atlas> atlases = packAtlases(sprites, config);
+    pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
+
+    // Step 3: Render atlases
+    Timer render;
     WebPConfig webpConfig;
     if (config.formats.contains(TextureFormat::Webp)) {
         WebPConfigInit(&webpConfig);
@@ -275,93 +316,13 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         webpConfig.quality = config.encoderQuality;
         webpConfig.thread_level = config.encoderMultithreading ? 1 : 0;
     }
-
-    std::vector<std::thread> threadPool;
-    uint16_t numThreads = config.builderThreads == 0
-        ? std::max(1u, std::thread::hardware_concurrency())
-        : config.builderThreads;
-    threadPool.reserve(numThreads);
-
-    size_t numInputFiles = config.inputFiles.size();
-
-    std::atomic<size_t> spritesRendered = 0;
-    std::atomic<size_t> atlasesBlitted = 0;
-    std::atomic<size_t> atlasesEncoded = 0;
-
-    // Used to block the main thread while the worker threads do work
-    std::latch renderingFinished{numThreads};
-    std::latch atlasBlittingFinished{numThreads};
-    std::latch atlasEncodingFinished{numThreads};
-
-    // Used to block the worker threads while the main thread does work
-    std::latch atlasPackingFinished{1};
-
-    std::vector<Sprite> sprites{numInputFiles};
-
-    std::vector<Atlas> atlases;
-
-    Timer parseSprites;
-
-    for (uint16_t i = 0; i < numThreads; ++i) {
-        threadPool.emplace_back([&] {
-            // Step 1: Render sprites
-            resvg_options* opt = resvg_options_create();
-            while (true) {
-                size_t idx = spritesRendered.fetch_add(1, std::memory_order::relaxed);
-                if (idx >= numInputFiles) break;
-
-                sprites[idx].data = renderSprite(config.inputFiles[idx], opt, config);
-            }
-            resvg_options_destroy(opt);
-            renderingFinished.count_down();
-
-            // Step 2: Pack sprites into atlases (done on main thread)
-            atlasPackingFinished.wait();
-
-            // Step 3: Blit sprites to atlases
-            while (true) {
-                size_t idx = atlasesBlitted.fetch_add(1, std::memory_order::relaxed);
-                if (idx >= atlases.size()) break;
-
-                blitAtlas(atlases[idx], config);
-            }
-            atlasBlittingFinished.count_down();
-            atlasBlittingFinished.wait();
-
-            // Step 4: Encode atlases
-            while (true) {
-                size_t idx = atlasesEncoded.fetch_add(1, std::memory_order::relaxed);
-                if (idx >= atlases.size()) break;
-
-                encodeAtlas(atlases[idx], webpConfig, config, idx);
-            }
-            atlasEncodingFinished.count_down();
-        });
-    }
-
-    // Step 1: Render sprites
-    renderingFinished.wait();
-    parseSprites.stop(std::format("[spritesheetc] {} sprites rendered", numInputFiles), config.logStatus);
-
-    // Step 2: Pack sprites into atlases
-    Timer pack;
-    atlases = packAtlases(sprites, config);
-    atlasPackingFinished.count_down();
-    pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
-
-    // Step 3: Blit sprites to atlases
-    Timer render;
-    atlasBlittingFinished.wait();
+    job(atlases.size(), [&](size_t idx) {
+        blitAtlas(atlases[idx], config);
+        encodeAtlas(atlases[idx], webpConfig, config, idx);
+    });
     render.stop(std::format("[spritesheetc] {} atlases rendered", atlases.size()), config.logStatus);
 
-    // Step 4: Encode atlases
-    Timer encode;
-    atlasEncodingFinished.wait();
-    encode.stop(std::format("[spritesheetc] {} atlases encoded", atlases.size()), config.logStatus);
-
     total.stop("[spritesheetc] Done. Total time", config.logStatus);
-
-    for (std::thread& thread : threadPool) thread.join();
 }
 
 void readDirectory(const std::string& path, std::vector<std::string>& files) {
