@@ -19,9 +19,6 @@
 
 using namespace spritesheetc;
 
-/**
- * Simple timer for profiling code.
- */
 class Timer {
 public:
     explicit Timer(bool autostart = true) {
@@ -62,6 +59,33 @@ private:
     bool m_stopped = false;
 };
 
+struct Buffer {
+    char* data;
+    size_t size;
+
+    explicit Buffer(size_t size) : data(new char[size]), size(size) { }
+    ~Buffer() { delete[] data; }
+
+    Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
+        other.data = nullptr;
+        other.size = 0;
+    }
+
+    Buffer& operator=(Buffer&& other) noexcept {
+        if (this != &other) {
+            delete[] data;
+            data = other.data;
+            size = other.size;
+            other.data = nullptr;
+            other.size = 0;
+        }
+        return *this;
+    }
+
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+};
+
 using SpacesType = rectpack2D::empty_spaces<false>;
 using Rect = rectpack2D::output_rect_t<SpacesType>;
 
@@ -94,7 +118,7 @@ struct Spritesheet {
 struct SpriteData {
     std::string name;
     Rect rect;
-    std::vector<uint8_t> pixels;
+    resvg_render_tree* tree;
 };
 
 struct Sprite {
@@ -102,20 +126,20 @@ struct Sprite {
 
     [[nodiscard]] const std::string& name() const { return data->name; }
 
-    [[nodiscard]] auto& get_rect() { return data->rect; }
-    [[nodiscard]] const auto& get_rect() const { return data->rect; }
+    [[nodiscard]] auto& get_rect() const { return data->rect; }
 
-    [[nodiscard]] std::vector<uint8_t>& pixels() const { return data->pixels; }
+    [[nodiscard]] resvg_render_tree* tree() const { return data->tree; }
 };
 
 struct Atlas {
     uint16_t w, h;
+    uint16_t spriteMaxW, spriteMaxH;
     std::vector<Sprite> sprites;
     Spritesheet spritesheet;
-    std::vector<uint8_t> pixels;
+    Buffer pixels;
 };
 
-std::unique_ptr<SpriteData> renderSprite(
+std::unique_ptr<SpriteData> parseSprite(
     const std::string& filePath,
     resvg_options* opt,
     const SpritesheetBuilderConfig& config
@@ -166,22 +190,11 @@ std::unique_ptr<SpriteData> renderSprite(
     std::string filename = filePath.substr(filePath.find_last_of("/\\") + 1);
     std::string name = filename.substr(0, filename.find_last_of('.'));
 
-    std::unique_ptr<SpriteData> sprite = std::make_unique<SpriteData>(
+    return std::make_unique<SpriteData>(
         name,
         rectpack2D::rect_xywh(-1, -1, rectWidth, rectHeight),
-        std::vector<uint8_t>(width * height * 4)
+        tree
     );
-
-    resvg_render(
-        tree,
-        resvg_transform_identity(),
-        width,
-        height,
-        reinterpret_cast<char*>(sprite->pixels.data())
-    );
-    resvg_tree_destroy(tree);
-
-    return sprite;
 }
 
 std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBuilderConfig& config) {
@@ -198,10 +211,14 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
     );
     while (!sprites.empty()) {
         rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
+        uint16_t binWidth = result.w;
+        uint16_t binHeight = result.h;
+        uint16_t doublePadding = config.padding * 2;
 
         Atlas atlas = {
-            .w = (uint16_t) result.w,
-            .h = (uint16_t) result.h,
+            .w = binWidth,
+            .h = binHeight,
+            .pixels = Buffer(binWidth * binHeight * 4)
         };
 
         for (size_t i = 0; i < sprites.size(); ) {
@@ -211,6 +228,9 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
                 ++i;
                 continue;
             }
+
+            atlas.spriteMaxW = std::max((uint16_t) (rect.w - doublePadding), atlas.spriteMaxW);
+            atlas.spriteMaxH = std::max((uint16_t) (rect.h - doublePadding), atlas.spriteMaxH);
 
             atlas.spritesheet.frames[sprite.name()] = {
                 .frame = {
@@ -242,7 +262,7 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
 
     if (WebPPictureImportRGBA(
         &picture,
-        atlas.pixels.data(),
+        reinterpret_cast<const uint8_t*>(atlas.pixels.data),
         atlas.w * 4
     ) == 0) {
         throw SpritesheetBuilderException("WebP data import failed");
@@ -276,7 +296,7 @@ void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, uint16_t i
     }
 
     basisu::image image;
-    image.init(atlas.pixels.data(), atlas.w, atlas.h, 4);
+    image.init(reinterpret_cast<const uint8_t*>(atlas.pixels.data), atlas.w, atlas.h, 4);
     basisu::vector<basisu::image> images;
     images.push_back(image);
 
@@ -303,27 +323,51 @@ void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, uint16_t i
 
 void encodePng(const Atlas& atlas, uint16_t i) {
     basisu::image image;
-    image.init(atlas.pixels.data(), atlas.w, atlas.h, 4);
+    image.init(reinterpret_cast<const uint8_t*>(atlas.pixels.data), atlas.w, atlas.h, 4);
     basisu::save_png(std::format("output/atlas{}.png", i + 1).c_str(), image);
 }
 
-void blitAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
-    atlas.pixels = std::vector<uint8_t>((size_t) atlas.w * atlas.h * 4);
-    uint8_t* atlasData = atlas.pixels.data();
+void renderAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
+    char* atlasData = atlas.pixels.data;
 
-    for (const Sprite& sprite : atlas.sprites) {
+    Buffer spriteBuffer(atlas.spriteMaxW * atlas.spriteMaxH * 4);
+    char* spriteData = spriteBuffer.data;
+
+    int atlasWidth = atlas.w;
+    ptrdiff_t atlasStride = atlasWidth * 4;
+    int padding = config.padding;
+    int doublePadding = config.padding * 2;
+
+    resvg_transform transform = resvg_transform_identity();
+    for (size_t i = 0; i < atlas.sprites.size(); ++i) {
+        const Sprite& sprite = atlas.sprites[i];
+
         const Rect& rect = sprite.get_rect();
-        int rx = rect.x + config.padding;
-        int ry = rect.y + config.padding;
-        int rw = rect.w - config.padding * 2;
-        int rh = rect.h - config.padding * 2;
+        int rx = rect.x + padding;
+        int ry = rect.y + padding;
+        int rw = rect.w - doublePadding;
+        int rh = rect.h - doublePadding;
 
-        uint8_t* spriteData = sprite.pixels().data();
-        size_t rowStride = rw * 4;
+        // Zero out only the portion of the sprite buffer we need
+        // Don't bother zeroing if we just allocated the buffer (i == 0)
+        if (i != 0) std::memset(spriteData, 0, (size_t) rw * rh * 4);
+
+        resvg_render(
+            sprite.tree(),
+            transform,
+            rw,
+            rh,
+            spriteData
+        );
+        resvg_tree_destroy(sprite.tree());
+
+        ptrdiff_t spriteStride = rw * 4;
+        char* atlasOffset = atlasData + (ptrdiff_t) (ry * atlasWidth + rx) * 4;
+        char* spriteOffset = spriteData;
         for (int y = 0; y < rh; ++y) {
-            ptrdiff_t dstOffset = ((ry + y) * atlas.w + rx) * 4;
-            ptrdiff_t srcOffset = y * rw * 4;
-            std::memcpy(atlasData + dstOffset, spriteData + srcOffset, rowStride);
+            std::memcpy(atlasOffset, spriteOffset, spriteStride);
+            atlasOffset += atlasStride;
+            spriteOffset += spriteStride;
         }
     }
 }
@@ -380,22 +424,22 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     size_t numInputFiles = config.inputFiles.size();
 
-    // Step 1: Render sprites
-    Timer renderSprites;
+    // Phase 1: Parse sprites
+    Timer parseSprites;
     std::vector<Sprite> sprites{numInputFiles};
     resvg_options* opt = resvg_options_create();
     job(numInputFiles, [&](size_t idx) {
-        sprites[idx].data = renderSprite(config.inputFiles[idx], opt, config);
+        sprites[idx].data = parseSprite(config.inputFiles[idx], opt, config);
     });
     resvg_options_destroy(opt);
-    renderSprites.stop(std::format("[spritesheetc] {} sprites rendered", numInputFiles), config.logStatus);
+    parseSprites.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles), config.logStatus);
 
-    // Step 2: Pack sprites into atlases
+    // Phase 2: Pack sprites into atlases
     Timer pack;
     std::vector<Atlas> atlases = packAtlases(sprites, config);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
-    // Step 3: Render atlases
+    // Phase 3: Render atlases
     Timer render;
     WebPConfig webpConfig;
     if (config.formats.contains(TextureFormat::Webp)) {
@@ -406,7 +450,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         webpConfig.thread_level = config.encoderMultithreading ? 1 : 0;
     }
     job(atlases.size(), [&](size_t idx) {
-        blitAtlas(atlases[idx], config);
+        renderAtlas(atlases[idx], config);
         encodeAtlas(atlases[idx], webpConfig, config, idx);
     });
     render.stop(std::format("[spritesheetc] {} atlases rendered", atlases.size()), config.logStatus);
@@ -465,6 +509,7 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/normal"
         }),
         .formats = {TextureFormat::Webp},
+        .encoderMultithreading = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });
