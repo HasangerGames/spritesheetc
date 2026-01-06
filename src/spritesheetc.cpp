@@ -142,7 +142,7 @@ std::vector<Atlas> packAtlases(
     return atlases;
 }
 
-void encodeWebp(const std::vector<uint8_t>& data, const Atlas& atlas, const WebPConfig& config, uint16_t i) {
+void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
     WebPPicture picture;
     if (WebPPictureInit(&picture) == 0) {
         throw SpritesheetBuilderException("WebP picture init failed");
@@ -153,7 +153,7 @@ void encodeWebp(const std::vector<uint8_t>& data, const Atlas& atlas, const WebP
 
     if (WebPPictureImportRGBA(
         &picture,
-        data.data(),
+        atlas.pixels.data(),
         atlas.w * 4
     ) == 0) {
         throw SpritesheetBuilderException("WebP data import failed");
@@ -181,13 +181,13 @@ void encodeWebp(const std::vector<uint8_t>& data, const Atlas& atlas, const WebP
     output.close();
 }
 
-void encodeUastc(const std::vector<uint8_t>& data, const Atlas& atlas, basist::basis_tex_format format, uint16_t i) {
+void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, uint16_t i) {
     if (!basisu::basisu_encoder_init()) {
         throw SpritesheetBuilderException("BasisU encoder init failed");
     }
 
     basisu::image image;
-    image.init(data.data(), atlas.w, atlas.h, 4);
+    image.init(atlas.pixels.data(), atlas.w, atlas.h, 4);
     basisu::vector<basisu::image> images;
     images.push_back(image);
 
@@ -212,14 +212,15 @@ void encodeUastc(const std::vector<uint8_t>& data, const Atlas& atlas, basist::b
     basisu::basis_free_data(rawData);
 }
 
-void encodePng(const std::vector<uint8_t>& data, const Atlas& atlas, uint16_t i) {
+void encodePng(const Atlas& atlas, uint16_t i) {
     basisu::image image;
-    image.init(data.data(), atlas.w, atlas.h, 4);
+    image.init(atlas.pixels.data(), atlas.w, atlas.h, 4);
     basisu::save_png(std::format("output/atlas{}.png", i + 1).c_str(), image);
 }
 
-void blitAtlas(const Atlas& atlas, const WebPConfig& webpConfig, const SpritesheetBuilderConfig& config, uint16_t i) {
-    auto atlasBuffer = std::vector<uint8_t>((size_t) atlas.w * atlas.h * 4);
+void blitAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
+    atlas.pixels = std::vector<uint8_t>((size_t) atlas.w * atlas.h * 4);
+    uint8_t* atlasData = atlas.pixels.data();
 
     for (const Sprite& sprite : atlas.sprites) {
         const Rect& rect = sprite.get_rect();
@@ -228,33 +229,31 @@ void blitAtlas(const Atlas& atlas, const WebPConfig& webpConfig, const Spriteshe
         int rw = rect.w - config.padding * 2;
         int rh = rect.h - config.padding * 2;
 
-        // Copy the sprite data from the sprite buffer to the atlas buffer
-        uint8_t* atlasData = atlasBuffer.data();
         uint8_t* spriteData = sprite.pixels().data();
         size_t rowStride = rw * 4;
         for (int y = 0; y < rh; ++y) {
-            std::memcpy(
-                atlasData + (ptrdiff_t) ((ry + y) * atlas.w + rx) * 4,
-                spriteData + (ptrdiff_t) y * rw * 4,
-                rowStride
-            );
+            ptrdiff_t dstOffset = ((ry + y) * atlas.w + rx) * 4;
+            ptrdiff_t srcOffset = y * rw * 4;
+            std::memcpy(atlasData + dstOffset, spriteData + srcOffset, rowStride);
         }
     }
+}
 
+void encodeAtlas(const Atlas& atlas, const WebPConfig& webpConfig, const SpritesheetBuilderConfig& config, uint16_t i) {
     for (TextureFormat format : config.formats) {
         switch (format) {
-            case TextureFormat::BasisuEtc1s:
-                encodeUastc(atlasBuffer, atlas, basist::basis_tex_format::cETC1S, i);
-                break;
-            case TextureFormat::BasisuUastc:
-                encodeUastc(atlasBuffer, atlas, basist::basis_tex_format::cUASTC4x4, i);
-                break;
-            case TextureFormat::Webp:
-                encodeWebp(atlasBuffer, atlas, webpConfig, i);
-                break;
-            case TextureFormat::Png:
-                encodePng(atlasBuffer, atlas, i);
-                break;
+        case TextureFormat::BasisuEtc1s:
+            encodeUastc(atlas, basist::basis_tex_format::cETC1S, i);
+            break;
+        case TextureFormat::BasisuUastc:
+            encodeUastc(atlas, basist::basis_tex_format::cUASTC4x4, i);
+            break;
+        case TextureFormat::Webp:
+            encodeWebp(atlas, webpConfig, i);
+            break;
+        case TextureFormat::Png:
+            encodePng(atlas, i);
+            break;
         }
     }
 }
@@ -285,11 +284,13 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     size_t numInputFiles = config.inputFiles.size();
 
-    std::atomic<size_t> spritesRendered = 0,
-                        atlasesEncoded = 0;
+    std::atomic<size_t> spritesRendered = 0;
+    std::atomic<size_t> atlasesBlitted = 0;
+    std::atomic<size_t> atlasesEncoded = 0;
 
     // Used to block the main thread while the worker threads do work
     std::latch renderingFinished{numThreads};
+    std::latch atlasBlittingFinished{numThreads};
     std::latch atlasEncodingFinished{numThreads};
 
     // Used to block the worker threads while the main thread does work
@@ -302,7 +303,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     Timer parseSprites;
 
     for (uint16_t i = 0; i < numThreads; ++i) {
-        threadPool.emplace_back([&, i] {
+        threadPool.emplace_back([&] {
             // Step 1: Render sprites
             resvg_options* opt = resvg_options_create();
             while (true) {
@@ -317,18 +318,22 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
             // Step 2: Pack sprites into atlases (done on main thread)
             atlasPackingFinished.wait();
 
-            // Step 3: Encode
+            // Step 3: Blit sprites to atlases
+            while (true) {
+                size_t idx = atlasesBlitted.fetch_add(1, std::memory_order::relaxed);
+                if (idx >= atlases.size()) break;
+
+                blitAtlas(atlases[idx], config);
+            }
+            atlasBlittingFinished.count_down();
+            atlasBlittingFinished.wait();
+
+            // Step 4: Encode atlases
             while (true) {
                 size_t idx = atlasesEncoded.fetch_add(1, std::memory_order::relaxed);
                 if (idx >= atlases.size()) break;
 
-                Timer render;
-                const Atlas& atlas = atlases[idx];
-                blitAtlas(atlas, webpConfig, config, idx);
-                render.stop(std::format(
-                    "[spritesheetc] atlas {}/{} ({} sprites) rendered",
-                    i, atlases.size(), atlas.sprites.size()
-                ), config.logStatus);
+                encodeAtlas(atlases[idx], webpConfig, config, idx);
             }
             atlasEncodingFinished.count_down();
         });
@@ -344,9 +349,17 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     atlasPackingFinished.count_down();
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
-    // Step 3: Encode atlases
+    // Step 3: Blit sprites to atlases
+    Timer render;
+    atlasBlittingFinished.wait();
+    render.stop(std::format("[spritesheetc] {} atlases rendered", atlases.size()), config.logStatus);
+
+    // Step 4: Encode atlases
+    Timer encode;
     atlasEncodingFinished.wait();
-    total.stop(std::format("[spritesheetc] {} atlases rendered", atlases.size()), config.logStatus);
+    encode.stop(std::format("[spritesheetc] {} atlases encoded", atlases.size()), config.logStatus);
+
+    total.stop("[spritesheetc] Done. Total time", config.logStatus);
 
     for (std::thread& thread : threadPool) thread.join();
 }
@@ -402,7 +415,6 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/normal"
         }),
         .formats = {TextureFormat::Webp},
-        .encoderMultithreading = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });

@@ -105,6 +105,7 @@ struct Atlas {
     uint16_t w, h;
     std::vector<Sprite> sprites;
     Spritesheet spritesheet;
+    std::vector<uint8_t> pixels;
 };
 
 namespace spritesheetc {
