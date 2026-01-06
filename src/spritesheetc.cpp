@@ -126,7 +126,7 @@ struct Sprite {
 
     [[nodiscard]] const std::string& name() const { return data->name; }
 
-    [[nodiscard]] auto& get_rect() const { return data->rect; }
+    [[nodiscard]] Rect& get_rect() const { return data->rect; }
 
     [[nodiscard]] resvg_render_tree* tree() const { return data->tree; }
 };
@@ -174,25 +174,24 @@ std::unique_ptr<SpriteData> parseSprite(
     }
 
     resvg_size size = resvg_get_image_size(tree);
-
-    int width      = std::ceil(size.width),
-        height     = std::ceil(size.height),
-        rectWidth  = width  + config.padding * 2,
-        rectHeight = height + config.padding * 2;
-
-    if (rectWidth > config.maxAtlasSize || rectHeight > config.maxAtlasSize) {
+    int width = std::ceil(size.width), height = std::ceil(size.height);
+    if (width > config.maxAtlasSize || height > config.maxAtlasSize) {
         throw SpritesheetBuilderException(std::format(
-            "{}: Maximum atlas size exceeded: width + padding {}, height + padding {}, maximum {}\n",
-            filePath, rectWidth, rectHeight, config.maxAtlasSize
+            "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}\n",
+            filePath, width, height, config.maxAtlasSize
         ));
     }
 
     std::string filename = filePath.substr(filePath.find_last_of("/\\") + 1);
     std::string name = filename.substr(0, filename.find_last_of('.'));
+    int doublePadding = config.padding * 2;
 
     return std::make_unique<SpriteData>(
         name,
-        rectpack2D::rect_xywh(-1, -1, rectWidth, rectHeight),
+        rectpack2D::rect_xywh(
+            -1, -1,
+            width + doublePadding, height + doublePadding
+        ),
         tree
     );
 }
@@ -202,8 +201,9 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
     constexpr auto insertCallback = [](auto&) {
         return rectpack2D::callback_result::CONTINUE_PACKING;
     };
+    uint16_t doublePadding = config.padding * 2;
     auto finderInput = rectpack2D::make_finder_input(
-        config.maxAtlasSize,
+        config.maxAtlasSize + doublePadding,
         config.packingQuality,
         insertCallback,
         insertCallback,
@@ -211,9 +211,8 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
     );
     while (!sprites.empty()) {
         rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
-        uint16_t binWidth = result.w;
-        uint16_t binHeight = result.h;
-        uint16_t doublePadding = config.padding * 2;
+        uint16_t binWidth = result.w - doublePadding;
+        uint16_t binHeight = result.h - doublePadding;
 
         Atlas atlas = {
             .w = binWidth,
@@ -290,7 +289,7 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
     output.close();
 }
 
-void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, uint16_t i) {
+void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, bool multithreaded, uint16_t i) {
     if (!basisu::basisu_encoder_init()) {
         throw SpritesheetBuilderException("BasisU encoder init failed");
     }
@@ -304,7 +303,7 @@ void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, uint16_t i
     void* rawData = basisu::basis_compress(
         format,
         images,
-        basisu::cFlagThreaded,
+        multithreaded ? basisu::cFlagThreaded : 0,
         1.0f,
         &fileSize,
         nullptr
@@ -335,7 +334,6 @@ void renderAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
 
     int atlasWidth = atlas.w;
     ptrdiff_t atlasStride = atlasWidth * 4;
-    int padding = config.padding;
     int doublePadding = config.padding * 2;
 
     resvg_transform transform = resvg_transform_identity();
@@ -343,28 +341,25 @@ void renderAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
         const Sprite& sprite = atlas.sprites[i];
 
         const Rect& rect = sprite.get_rect();
-        int rx = rect.x + padding;
-        int ry = rect.y + padding;
-        int rw = rect.w - doublePadding;
-        int rh = rect.h - doublePadding;
+        int width = rect.w - doublePadding;
+        int height = rect.h - doublePadding;
 
         // Zero out only the portion of the sprite buffer we need
-        // Don't bother zeroing if we just allocated the buffer (i == 0)
-        if (i != 0) std::memset(spriteData, 0, (size_t) rw * rh * 4);
+        std::memset(spriteData, 0, (size_t) width * height * 4);
 
         resvg_render(
             sprite.tree(),
             transform,
-            rw,
-            rh,
+            width,
+            height,
             spriteData
         );
         resvg_tree_destroy(sprite.tree());
 
-        ptrdiff_t spriteStride = rw * 4;
-        char* atlasOffset = atlasData + (ptrdiff_t) (ry * atlasWidth + rx) * 4;
+        ptrdiff_t spriteStride = width * 4;
+        char* atlasOffset = atlasData + (ptrdiff_t) (rect.y * atlasWidth + rect.x) * 4;
         char* spriteOffset = spriteData;
-        for (int y = 0; y < rh; ++y) {
+        for (uint16_t y = 0; y < height; ++y) {
             std::memcpy(atlasOffset, spriteOffset, spriteStride);
             atlasOffset += atlasStride;
             spriteOffset += spriteStride;
@@ -376,10 +371,10 @@ void encodeAtlas(const Atlas& atlas, const WebPConfig& webpConfig, const Sprites
     for (TextureFormat format : config.formats) {
         switch (format) {
         case TextureFormat::BasisuEtc1s:
-            encodeUastc(atlas, basist::basis_tex_format::cETC1S, i);
+            encodeUastc(atlas, basist::basis_tex_format::cETC1S, config.encoderMultithreading, i);
             break;
         case TextureFormat::BasisuUastc:
-            encodeUastc(atlas, basist::basis_tex_format::cUASTC4x4, i);
+            encodeUastc(atlas, basist::basis_tex_format::cUASTC4x4, config.encoderMultithreading, i);
             break;
         case TextureFormat::Webp:
             encodeWebp(atlas, webpConfig, i);
