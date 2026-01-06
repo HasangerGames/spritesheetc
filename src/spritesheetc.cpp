@@ -7,21 +7,113 @@
 #include <fstream>
 #include <thread>
 #include <unordered_map>
+#include <latch>
+#include <iostream>
+
+#include "basisu_comp.h"
+#include "resvg.h"
+#include "rectpack2D/finders_interface.h"
+#include "webp/encode.h"
 
 #include "spritesheetc.h"
 
-#include <latch>
-#include <queue>
-
-#include "basisu_comp.h"
-
-#include "resvg.h"
-
-#include "rectpack2D/finders_interface.h"
-
-#include "webp/encode.h"
-
 using namespace spritesheetc;
+
+/**
+ * Simple timer for profiling code.
+ */
+class Timer {
+public:
+    explicit Timer(bool autostart = true) {
+        if (autostart) start();
+    }
+
+    void start() {
+        if (m_started) {
+            std::cout << "Timer already started\n";
+            return;
+        }
+        m_start = std::chrono::steady_clock::now();
+        m_started = true;
+    }
+
+    void stop(const std::string& label, bool enableLogging = true, double threshold = 0) {
+        if (!m_start.has_value()) {
+            std::cout << label << ": Invalid time\n";
+            return;
+        }
+
+        if (m_stopped) {
+            std::cout << label << ": Already stopped\n";
+            return;
+        }
+        m_stopped = true;
+
+        if (!enableLogging) return;
+
+        auto elapsed = std::chrono::steady_clock::now() - m_start.value();
+        auto ms = std::chrono::duration<double, std::milli>(elapsed).count();
+        if (ms < threshold) return;
+        std::cout << std::format("{}: {:.3f} ms\n", label, ms);
+    }
+private:
+    std::optional<std::chrono::steady_clock::time_point> m_start = std::nullopt;
+    bool m_started = false;
+    bool m_stopped = false;
+};
+
+using SpacesType = rectpack2D::empty_spaces<false>;
+using Rect = rectpack2D::output_rect_t<SpacesType>;
+
+struct SpritesheetRect {
+    uint16_t x, y, w, h;
+};
+
+struct SpritesheetSize {
+    uint16_t w, h;
+};
+
+struct SpritesheetFrame {
+    SpritesheetRect frame;
+    SpritesheetSize sourceSize;
+};
+
+struct SpritesheetMeta {
+    std::string image;
+    float scale;
+    SpritesheetSize size;
+};
+
+using SpritesheetFrames = std::unordered_map<std::string, SpritesheetFrame>;
+
+struct Spritesheet {
+    SpritesheetMeta meta;
+    SpritesheetFrames frames;
+};
+
+struct SpriteData {
+    std::string name;
+    Rect rect;
+    std::vector<uint8_t> pixels;
+};
+
+struct Sprite {
+    std::unique_ptr<SpriteData> data;
+
+    [[nodiscard]] const std::string& name() const { return data->name; }
+
+    [[nodiscard]] auto& get_rect() { return data->rect; }
+    [[nodiscard]] const auto& get_rect() const { return data->rect; }
+
+    [[nodiscard]] std::vector<uint8_t>& pixels() const { return data->pixels; }
+};
+
+struct Atlas {
+    uint16_t w, h;
+    std::vector<Sprite> sprites;
+    Spritesheet spritesheet;
+    std::vector<uint8_t> pixels;
+};
 
 std::unique_ptr<SpriteData> renderSprite(
     const std::string& filePath,
@@ -92,10 +184,7 @@ std::unique_ptr<SpriteData> renderSprite(
     return sprite;
 }
 
-std::vector<Atlas> packAtlases(
-    std::vector<Sprite>& sprites,
-    const SpritesheetBuilderConfig& config
-) {
+std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBuilderConfig& config) {
     std::vector<Atlas> atlases;
     constexpr auto insertCallback = [](auto&) {
         return rectpack2D::callback_result::CONTINUE_PACKING;
@@ -326,7 +415,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 }
 
 void readDirectory(const std::string& path, std::vector<std::string>& files) {
-    for (const fs::directory_entry& entry : fs::recursive_directory_iterator(path)) {
+    for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path)) {
         if (entry.is_directory()) continue;
         std::string filePath = entry.path();
         if (!filePath.ends_with(".svg")) continue;
