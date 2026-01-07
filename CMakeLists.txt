@@ -29,12 +29,18 @@ add_subdirectory(vendored/libwebp)
 
 add_subdirectory(vendored/rectpack2D)
 
-add_library(resvg STATIC IMPORTED)
-set(RESVG_DIR "${CMAKE_SOURCE_DIR}/vendored/resvg")
-set_target_properties(resvg PROPERTIES
-    IMPORTED_LOCATION "${RESVG_DIR}/target/release/libresvg.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${RESVG_DIR}/crates/c-api"
+add_library(thorvg STATIC IMPORTED)
+
+set(THORVG_DIR "${CMAKE_SOURCE_DIR}/vendored/thorvg")
+
+set_target_properties(thorvg PROPERTIES
+    IMPORTED_LOCATION "${THORVG_DIR}/builddir/src/libthorvg-1.a"
     LINKER_LANGUAGE CXX
+)
+
+target_include_directories(thorvg INTERFACE
+    "${THORVG_DIR}/src"
+    "${THORVG_DIR}/inc"
 )
 
 target_link_libraries(spritesheetc PRIVATE
@@ -42,5 +48,5 @@ target_link_libraries(spritesheetc PRIVATE
     glaze::glaze
     webp
     rectpack2D::rectpack2D
-    resvg
+    thorvg
 )

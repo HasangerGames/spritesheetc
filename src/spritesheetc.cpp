@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -11,11 +10,12 @@
 #include <iostream>
 
 #include "basisu_comp.h"
-#include "resvg.h"
 #include "rectpack2D/finders_interface.h"
 #include "webp/encode.h"
 
 #include "spritesheetc.h"
+
+#include "thorvg.h"
 
 using namespace spritesheetc;
 
@@ -59,11 +59,12 @@ private:
     bool m_stopped = false;
 };
 
+template<typename T>
 struct Buffer {
-    char* data;
+    T* data;
     size_t size;
 
-    explicit Buffer(size_t size) : data(new char[size]), size(size) { }
+    explicit Buffer(size_t size) : data(new T[size]), size(size) { }
     ~Buffer() { delete[] data; }
 
     Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
@@ -118,7 +119,7 @@ struct Spritesheet {
 struct SpriteData {
     std::string name;
     Rect rect;
-    resvg_render_tree* tree;
+    tvg::Picture* picture;
 };
 
 struct Sprite {
@@ -128,7 +129,7 @@ struct Sprite {
 
     [[nodiscard]] Rect& get_rect() const { return data->rect; }
 
-    [[nodiscard]] resvg_render_tree* tree() const { return data->tree; }
+    [[nodiscard]] tvg::Picture* picture() const { return data->picture; }
 };
 
 struct Atlas {
@@ -136,48 +137,27 @@ struct Atlas {
     uint16_t spriteMaxW, spriteMaxH;
     std::vector<Sprite> sprites;
     Spritesheet spritesheet;
-    Buffer pixels;
+    Buffer<uint32_t> pixels;
 };
 
 std::unique_ptr<SpriteData> parseSprite(
     const std::string& filePath,
-    resvg_options* opt,
     const SpritesheetBuilderConfig& config
 ) {
-    resvg_render_tree* tree;
-    auto err = (resvg_error) resvg_parse_tree_from_file(filePath.c_str(), opt, &tree);
-    if (err != RESVG_OK) {
-        std::string errorMessage;
-        switch (err) {
-            case RESVG_ERROR_NOT_AN_UTF8_STR:
-                errorMessage = "File is not UTF-8";
-                break;
-            case RESVG_ERROR_FILE_OPEN_FAILED:
-                errorMessage = "Failed to open file";
-                break;
-            case RESVG_ERROR_MALFORMED_GZIP:
-                errorMessage = "Compressed SVG must use the GZip algorithm";
-                break;
-            case RESVG_ERROR_ELEMENTS_LIMIT_REACHED:
-                errorMessage = "SVGs with more than 1,000,000 elements are unsupported";
-                break;
-            case RESVG_ERROR_INVALID_SIZE:
-                errorMessage = "Invalid size. width, height and viewBox must be set";
-                break;
-            case RESVG_ERROR_PARSING_FAILED:
-                errorMessage = "Failed to parse SVG data";
-                break;
-            default:
-                break;
-        }
-        throw SpritesheetBuilderException(filePath + ": Failed to parse: " + errorMessage);
+    tvg::Picture* picture = tvg::Picture::gen();
+    if (picture->load(filePath.c_str()) != tvg::Result::Success) {
+        throw SpritesheetBuilderException(filePath + ": Failed to load image");
     }
 
-    resvg_size size = resvg_get_image_size(tree);
-    int width = std::ceil(size.width), height = std::ceil(size.height);
+    float fWidth, fHeight;
+    if (picture->bounds(nullptr, nullptr, &fWidth, &fHeight) != tvg::Result::Success) {
+        throw SpritesheetBuilderException(filePath + ": Failed to parse bounds");
+    }
+
+    int width = std::ceil(fWidth), height = std::ceil(fHeight);
     if (width > config.maxAtlasSize || height > config.maxAtlasSize) {
         throw SpritesheetBuilderException(std::format(
-            "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}\n",
+            "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}",
             filePath, width, height, config.maxAtlasSize
         ));
     }
@@ -192,7 +172,7 @@ std::unique_ptr<SpriteData> parseSprite(
             -1, -1,
             width + doublePadding, height + doublePadding
         ),
-        tree
+        picture
     );
 }
 
@@ -217,7 +197,7 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
         Atlas atlas = {
             .w = binWidth,
             .h = binHeight,
-            .pixels = Buffer(binWidth * binHeight * 4)
+            .pixels = Buffer<uint32_t>(binWidth * binHeight)
         };
 
         for (size_t i = 0; i < sprites.size(); ) {
@@ -258,14 +238,8 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
     picture.width = atlas.w;
     picture.height = atlas.h;
     picture.use_argb = 1;
-
-    if (WebPPictureImportRGBA(
-        &picture,
-        reinterpret_cast<const uint8_t*>(atlas.pixels.data),
-        atlas.w * 4
-    ) == 0) {
-        throw SpritesheetBuilderException("WebP data import failed");
-    }
+    picture.argb = atlas.pixels.data;
+    picture.argb_stride = atlas.w;
 
     std::string filename = std::format("output/atlas{}.webp", i + 1);
     std::ofstream output{filename};
@@ -327,44 +301,19 @@ void encodePng(const Atlas& atlas, uint16_t i) {
 }
 
 void renderAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
-    char* atlasData = atlas.pixels.data;
+    uint32_t* atlasData = atlas.pixels.data;
 
-    Buffer spriteBuffer(atlas.spriteMaxW * atlas.spriteMaxH * 4);
-    char* spriteData = spriteBuffer.data;
+    tvg::SwCanvas* canvas = tvg::SwCanvas::gen();
+    canvas->target(atlasData, atlas.w, atlas.w, atlas.h, tvg::ColorSpace::ARGB8888);
 
-    int atlasWidth = atlas.w;
-    ptrdiff_t atlasStride = atlasWidth * 4;
-    int doublePadding = config.padding * 2;
-
-    resvg_transform transform = resvg_transform_identity();
-    for (size_t i = 0; i < atlas.sprites.size(); ++i) {
-        const Sprite& sprite = atlas.sprites[i];
-
+    for (const Sprite& sprite : atlas.sprites) {
+        tvg::Picture* picture = sprite.picture();
         const Rect& rect = sprite.get_rect();
-        int width = rect.w - doublePadding;
-        int height = rect.h - doublePadding;
-
-        // Zero out only the portion of the sprite buffer we need
-        std::memset(spriteData, 0, (size_t) width * height * 4);
-
-        resvg_render(
-            sprite.tree(),
-            transform,
-            width,
-            height,
-            spriteData
-        );
-        resvg_tree_destroy(sprite.tree());
-
-        ptrdiff_t spriteStride = width * 4;
-        char* atlasOffset = atlasData + (ptrdiff_t) (rect.y * atlasWidth + rect.x) * 4;
-        char* spriteOffset = spriteData;
-        for (uint16_t y = 0; y < height; ++y) {
-            std::memcpy(atlasOffset, spriteOffset, spriteStride);
-            atlasOffset += atlasStride;
-            spriteOffset += spriteStride;
-        }
+        picture->translate(rect.x, rect.y);
+        canvas->push(sprite.picture());
     }
+
+    canvas->draw();
 }
 
 void encodeAtlas(const Atlas& atlas, const WebPConfig& webpConfig, const SpritesheetBuilderConfig& config, uint16_t i) {
@@ -401,6 +350,8 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         : config.builderThreads;
     threadPool.reserve(numThreads);
 
+    tvg::Initializer::init(numThreads);
+
     auto job = [&](size_t numItems, const std::function<void(size_t idx)>& exec) {
         threadPool.clear();
         std::atomic<size_t> numFinishedItems = 0;
@@ -422,11 +373,9 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     // Phase 1: Parse sprites
     Timer parseSprites;
     std::vector<Sprite> sprites{numInputFiles};
-    resvg_options* opt = resvg_options_create();
     job(numInputFiles, [&](size_t idx) {
-        sprites[idx].data = parseSprite(config.inputFiles[idx], opt, config);
+        sprites[idx].data = parseSprite(config.inputFiles[idx], config);
     });
-    resvg_options_destroy(opt);
     parseSprites.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles), config.logStatus);
 
     // Phase 2: Pack sprites into atlases
