@@ -17,11 +17,12 @@
 
 #include "spritesheetc.h"
 
+#include <memory_resource>
 #include <queue>
 
 using namespace spritesheetc;
 
-using Job = std::function<void()>;
+using Job = std::function<void(std::pmr::memory_resource&)>;
 
 class ThreadPool {
 public:
@@ -47,6 +48,7 @@ public:
     }
 private:
     void threadLoop(const std::stop_token& stopToken) {
+        std::pmr::unsynchronized_pool_resource mem;
         while (true) {
             Job job;
             {
@@ -56,7 +58,7 @@ private:
                 job = m_jobs.front();
                 m_jobs.pop();
             }
-            job();
+            job(mem);
         }
     }
 
@@ -110,8 +112,11 @@ struct Buffer {
     uint32_t* data;
     size_t size;
 
-    explicit Buffer(size_t size) : data(new uint32_t[size]), size(size) { }
-    ~Buffer() { delete[] data; }
+    Buffer() : data(nullptr), size(0) { }
+
+    explicit Buffer(std::pmr::memory_resource& mem, size_t size) :
+        data(static_cast<uint32_t*>(mem.allocate(size * sizeof(uint32_t), alignof(uint32_t)))),
+        size(size) { }
 
     Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
         other.data = nullptr;
@@ -181,10 +186,10 @@ struct Sprite {
 
 struct Atlas {
     uint16_t w, h;
-    uint16_t spriteMaxW, spriteMaxH;
+    Buffer pixels;
+    uint16_t spriteMaxW = 0, spriteMaxH = 0;
     std::vector<Sprite> sprites;
     Spritesheet spritesheet;
-    Buffer pixels;
 };
 
 std::unique_ptr<SpriteData> parseSprite(
@@ -244,7 +249,7 @@ std::unique_ptr<SpriteData> parseSprite(
     );
 }
 
-std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBuilderConfig& config) {
+std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBuilderConfig& config, std::pmr::memory_resource& mem) {
     std::vector<Atlas> atlases;
     constexpr auto insertCallback = [](auto&) {
         return rectpack2D::callback_result::CONTINUE_PACKING;
@@ -259,22 +264,18 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
     );
     while (!sprites.empty()) {
         rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
+
         uint16_t binWidth = result.w - doublePadding;
         uint16_t binHeight = result.h - doublePadding;
-
         Atlas& atlas = atlases.emplace_back(
             binWidth,
             binHeight,
-            0,
-            0,
-            std::vector<Sprite>(),
-            Spritesheet(),
-            Buffer(binWidth * binHeight)
+            Buffer(mem, binWidth * binHeight)
         );
 
         for (size_t i = 0; i < sprites.size(); ) {
             Sprite& sprite = sprites[i];
-            const Rect& rect = sprite.get_rect();
+            const Rect& rect = sprite->rect;
             if (rect.x == -1) { // -1 means sprite hasn't been packed yet
                 ++i;
                 continue;
@@ -300,11 +301,11 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
     return atlases;
 }
 
-void renderSprite(const Sprite& sprite, const Atlas& atlas) {
+void renderSprite(const Sprite& sprite, const Atlas& atlas, std::pmr::memory_resource& mem) {
     uint16_t width = sprite->width;
     uint16_t height = sprite->height;
 
-    Buffer spritePixels(width * height);
+    Buffer spritePixels(mem, width * height);
     uint32_t* spriteData = spritePixels.data;
     std::memset(spriteData, 0, spritePixels.size * 4);
 
@@ -447,7 +448,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     resvg_options* opt = resvg_options_create();
 
     for (size_t i = 0; i < numInputFiles; ++i) {
-        threadPool.queueJob([&, i] {
+        threadPool.queueJob([&, i](std::pmr::memory_resource&) {
             sprites[i].data = parseSprite(config.inputFiles[i], opt, config);
             parseLatch.count_down();
         });
@@ -459,7 +460,8 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     // Phase 2: Pack sprites into atlases
     Timer pack;
-    std::vector<Atlas> atlases = packAtlases(sprites, config);
+    std::pmr::unsynchronized_pool_resource mem;
+    std::vector<Atlas> atlases = packAtlases(sprites, config, mem);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
     WebPConfig webpConfig;
@@ -484,13 +486,13 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         Atlas& atlas = atlases[i];
         remainingSprites[i] = atlas.sprites.size();
         for (const Sprite& sprite : atlas.sprites) {
-            threadPool.queueJob([&, i] {
-                renderSprite(sprite, atlas);
+            threadPool.queueJob([&, i](std::pmr::memory_resource& spriteMem) {
+                renderSprite(sprite, atlas, spriteMem);
                 renderLatch.count_down();
 
                 if (remainingSprites[i].fetch_sub(1, std::memory_order::relaxed) > 1) return;
 
-                threadPool.queueJob([&, i] {
+                threadPool.queueJob([&, i](std::pmr::memory_resource&) {
                     encode.start();
                     encodeAtlas(atlas, webpConfig, config, i);
                     encodeLatch.count_down();
@@ -561,6 +563,7 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/normal"
         }),
         .formats = {TextureFormat::Webp},
+        .encoderMultithreading = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });
