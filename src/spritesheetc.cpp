@@ -17,7 +17,55 @@
 
 #include "spritesheetc.h"
 
+#include <queue>
+
 using namespace spritesheetc;
+
+using Job = std::function<void()>;
+
+class ThreadPool {
+public:
+    ThreadPool(uint16_t numThreads) {
+        m_threads.reserve(numThreads);
+        for (uint16_t i = 0; i < numThreads; ++i) {
+            m_threads.emplace_back(&ThreadPool::threadLoop, this);
+        }
+    }
+    ~ThreadPool() { shutdown(); }
+
+    void queueJob(Job job) {
+        {
+            std::unique_lock lock(m_mutex);
+            m_jobs.push(std::move(job));
+        }
+        m_conditionVar.notify_one();
+    }
+
+    void shutdown() {
+        for (std::jthread& thread : m_threads) thread.request_stop();
+        m_conditionVar.notify_all();
+    }
+private:
+    void threadLoop(const std::stop_token& stopToken) {
+        while (true) {
+            Job job;
+            {
+                std::unique_lock lock(m_mutex);
+                m_conditionVar.wait(lock, [&] { return !m_jobs.empty() || stopToken.stop_requested(); });
+                if (stopToken.stop_requested()) return;
+                job = m_jobs.front();
+                m_jobs.pop();
+            }
+            job();
+        }
+    }
+
+    std::vector<std::jthread> m_threads;
+    std::mutex m_mutex;
+    std::condition_variable m_conditionVar;
+    std::queue<Job> m_jobs;
+    bool m_shutdown = false;
+};
 
 class Timer {
 public:
@@ -27,7 +75,6 @@ public:
 
     void start() {
         if (m_started) {
-            std::cout << "Timer already started\n";
             return;
         }
         m_start = std::chrono::steady_clock::now();
@@ -115,8 +162,11 @@ struct Spritesheet {
     SpritesheetFrames frames;
 };
 
+struct Atlas;
+
 struct SpriteData {
     std::string name;
+    uint16_t width, height;
     Rect rect;
     resvg_render_tree* tree;
 };
@@ -124,7 +174,7 @@ struct SpriteData {
 struct Sprite {
     std::unique_ptr<SpriteData> data;
 
-    SpriteData* operator->() const { return data.get(); }
+    SpriteData* operator->() const { return data.operator->(); }
 
     [[nodiscard]] Rect& get_rect() const { return data->rect; }
 };
@@ -175,7 +225,7 @@ std::unique_ptr<SpriteData> parseSprite(
     int width = std::ceil(size.width), height = std::ceil(size.height);
     if (width > config.maxAtlasSize || height > config.maxAtlasSize) {
         throw SpritesheetBuilderException(std::format(
-            "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}\n",
+            "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}",
             filePath, width, height, config.maxAtlasSize
         ));
     }
@@ -184,6 +234,8 @@ std::unique_ptr<SpriteData> parseSprite(
 
     return std::make_unique<SpriteData>(
         std::filesystem::path(filePath).stem(),
+        width,
+        height,
         rectpack2D::rect_xywh(
             -1, -1,
             width + doublePadding, height + doublePadding
@@ -210,11 +262,15 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
         uint16_t binWidth = result.w - doublePadding;
         uint16_t binHeight = result.h - doublePadding;
 
-        Atlas atlas = {
-            .w = binWidth,
-            .h = binHeight,
-            .pixels = Buffer(binWidth * binHeight)
-        };
+        Atlas& atlas = atlases.emplace_back(
+            binWidth,
+            binHeight,
+            0,
+            0,
+            std::vector<Sprite>(),
+            Spritesheet(),
+            Buffer(binWidth * binHeight)
+        );
 
         for (size_t i = 0; i < sprites.size(); ) {
             Sprite& sprite = sprites[i];
@@ -240,10 +296,37 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
             sprites[i] = std::move(sprites.back());
             sprites.pop_back();
         }
-
-        atlases.push_back(std::move(atlas));
     }
     return atlases;
+}
+
+void renderSprite(const Sprite& sprite, const Atlas& atlas) {
+    uint16_t width = sprite->width;
+    uint16_t height = sprite->height;
+
+    Buffer spritePixels(width * height);
+    uint32_t* spriteData = spritePixels.data;
+    std::memset(spriteData, 0, spritePixels.size * 4);
+
+    resvg_render(
+        sprite->tree,
+        resvg_transform_identity(),
+        width,
+        height,
+        reinterpret_cast<char*>(spriteData)
+    );
+    resvg_tree_destroy(sprite->tree);
+
+    uint16_t atlasWidth = atlas.w;
+    const Rect& rect = sprite->rect;
+    uint32_t* atlasData = atlas.pixels.data + rect.x + (rect.y * atlasWidth);
+    uint16_t rowBytes = width * 4;
+
+    for (uint16_t y = 0; y < height; ++y) {
+        std::memcpy(atlasData, spriteData, rowBytes);
+        atlasData += atlasWidth;
+        spriteData += width;
+    }
 }
 
 void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
@@ -322,45 +405,6 @@ void encodePng(const Atlas& atlas, uint16_t i) {
     basisu::save_png(std::format("output/atlas{}.png", i + 1).c_str(), image);
 }
 
-void renderAtlas(const Atlas& atlas, const SpritesheetBuilderConfig& config) {
-    uint32_t* atlasData = atlas.pixels.data;
-
-    Buffer spriteBuffer(atlas.spriteMaxW * atlas.spriteMaxH);
-    uint32_t* spriteData = spriteBuffer.data;
-
-    ptrdiff_t atlasWidth = atlas.w;
-    size_t doublePadding = config.padding * 2;
-
-    resvg_transform transform = resvg_transform_identity();
-
-    for (const Sprite& sprite : atlas.sprites) {
-        const Rect& rect = sprite.get_rect();
-        size_t width = rect.w - doublePadding;
-        size_t height = rect.h - doublePadding;
-
-        // Zero out only the portion of the sprite buffer we need
-        std::memset(spriteData, 0, width * height * 4);
-
-        resvg_render(
-            sprite->tree,
-            transform,
-            width,
-            height,
-            reinterpret_cast<char*>(spriteData)
-        );
-        resvg_tree_destroy(sprite->tree);
-
-        uint32_t* atlasOffset = atlasData + rect.x + (rect.y * atlasWidth);
-        uint32_t* spriteOffset = spriteData;
-        size_t rowBytes = width * 4;
-        for (uint16_t y = 0; y < height; ++y) {
-            std::memcpy(atlasOffset, spriteOffset, rowBytes);
-            atlasOffset += atlasWidth;
-            spriteOffset += width;
-        }
-    }
-}
-
 void encodeAtlas(const Atlas& atlas, const WebPConfig& webpConfig, const SpritesheetBuilderConfig& config, uint16_t i) {
     for (TextureFormat format : config.formats) {
         switch (format) {
@@ -389,68 +433,79 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         throw SpritesheetBuilderException("Output path does not exist or is not a directory: " + config.outputDirectory);
     }
 
-    std::vector<std::thread> threadPool;
-    size_t numThreads = config.builderThreads == 0
+    uint16_t numThreads = config.builderThreads == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : config.builderThreads;
-    threadPool.reserve(numThreads);
-
-    auto job = [&](size_t numItems, const std::function<void(size_t)>& exec) {
-        threadPool.clear();
-        std::atomic<size_t> numFinishedItems = 0;
-        size_t numJobThreads = std::min(numThreads, numItems);
-        for (size_t i = 0; i < numJobThreads; ++i) {
-            threadPool.emplace_back([&, i] {
-                if (numItems <= numJobThreads) {
-                    exec(i);
-                    return;
-                }
-
-                while (true) {
-                    size_t idx = numFinishedItems.fetch_add(1, std::memory_order::relaxed);
-                    if (idx >= numItems) break;
-
-                    exec(idx);
-                }
-            });
-        }
-        for (std::thread& thread : threadPool) thread.join();
-    };
+    ThreadPool threadPool{numThreads};
 
     size_t numInputFiles = config.inputFiles.size();
 
     // Phase 1: Parse sprites
-    Timer parseSprites;
+    Timer parse;
     std::vector<Sprite> sprites{numInputFiles};
+    std::latch parseLatch{(ptrdiff_t) numInputFiles};
     resvg_options* opt = resvg_options_create();
-    job(numInputFiles, [&](size_t idx) {
-        sprites[idx].data = parseSprite(config.inputFiles[idx], opt, config);
-    });
+
+    for (size_t i = 0; i < numInputFiles; ++i) {
+        threadPool.queueJob([&, i] {
+            sprites[i].data = parseSprite(config.inputFiles[i], opt, config);
+            parseLatch.count_down();
+        });
+    }
+
+    parseLatch.wait();
     resvg_options_destroy(opt);
-    parseSprites.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles), config.logStatus);
+    parse.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles), config.logStatus);
 
     // Phase 2: Pack sprites into atlases
     Timer pack;
     std::vector<Atlas> atlases = packAtlases(sprites, config);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
-    // Phase 3: Render atlases
-    Timer render;
     WebPConfig webpConfig;
     if (config.formats.contains(TextureFormat::Webp)) {
-        if (WebPConfigInit(&webpConfig) == 0) {
-            throw SpritesheetBuilderException("WebP config version mismatch");
-        }
+        WebPConfigInit(&webpConfig);
         webpConfig.method = config.encoderMethod;
         webpConfig.lossless = config.encoderLossless ? 1 : 0;
         webpConfig.quality = config.encoderQuality;
         webpConfig.thread_level = config.encoderMultithreading ? 1 : 0;
     }
-    job(atlases.size(), [&](size_t idx) {
-        renderAtlas(atlases[idx], config);
-        encodeAtlas(atlases[idx], webpConfig, config, idx);
-    });
-    render.stop(std::format("[spritesheetc] {} atlases rendered", atlases.size()), config.logStatus);
+
+    // Phase 3: Render sprites to atlases + encode atlases
+    Timer render;
+    Timer encode(false);
+
+    std::latch renderLatch{(ptrdiff_t) numInputFiles};
+    std::latch encodeLatch{(ptrdiff_t) atlases.size()};
+
+    std::vector<std::atomic<size_t>> remainingSprites(atlases.size());
+
+    for (size_t i = 0; i < atlases.size(); ++i) {
+        Atlas& atlas = atlases[i];
+        remainingSprites[i] = atlas.sprites.size();
+        for (const Sprite& sprite : atlas.sprites) {
+            threadPool.queueJob([&, i] {
+                renderSprite(sprite, atlas);
+                renderLatch.count_down();
+
+                if (remainingSprites[i].fetch_sub(1, std::memory_order::relaxed) > 1) return;
+
+                threadPool.queueJob([&, i] {
+                    encode.start();
+                    encodeAtlas(atlas, webpConfig, config, i);
+                    encodeLatch.count_down();
+                });
+            });
+        }
+    }
+
+    renderLatch.wait();
+    render.stop(std::format("[spritesheetc] {} sprites rendered", numInputFiles), config.logStatus);
+
+    encodeLatch.wait();
+    encode.stop(std::format("[spritesheetc] {} atlases written", atlases.size()), config.logStatus);
+
+    threadPool.shutdown();
 
     total.stop("[spritesheetc] Done. Total time", config.logStatus);
 }
