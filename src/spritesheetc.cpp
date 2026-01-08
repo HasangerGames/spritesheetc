@@ -124,11 +124,9 @@ struct SpriteData {
 struct Sprite {
     std::unique_ptr<SpriteData> data;
 
-    [[nodiscard]] const std::string& name() const { return data->name; }
+    SpriteData* operator->() const { return data.get(); }
 
     [[nodiscard]] Rect& get_rect() const { return data->rect; }
-
-    [[nodiscard]] resvg_render_tree* tree() const { return data->tree; }
 };
 
 struct Atlas {
@@ -229,7 +227,7 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
             atlas.spriteMaxW = std::max((uint16_t) (rect.w - doublePadding), atlas.spriteMaxW);
             atlas.spriteMaxH = std::max((uint16_t) (rect.h - doublePadding), atlas.spriteMaxH);
 
-            atlas.spritesheet.frames[sprite.name()] = {
+            atlas.spritesheet.frames[sprite->name] = {
                 .frame = {
                     .x = (uint16_t) rect.x,
                     .y = (uint16_t) rect.y,
@@ -344,13 +342,13 @@ void renderAtlas(const Atlas& atlas, const SpritesheetBuilderConfig& config) {
         std::memset(spriteData, 0, width * height * 4);
 
         resvg_render(
-            sprite.tree(),
+            sprite->tree,
             transform,
             width,
             height,
             reinterpret_cast<char*>(spriteData)
         );
-        resvg_tree_destroy(sprite.tree());
+        resvg_tree_destroy(sprite->tree);
 
         uint32_t* atlasOffset = atlasData + rect.x + (rect.y * atlasWidth);
         uint32_t* spriteOffset = spriteData;
@@ -392,16 +390,22 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     }
 
     std::vector<std::thread> threadPool;
-    uint16_t numThreads = config.builderThreads == 0
+    size_t numThreads = config.builderThreads == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : config.builderThreads;
     threadPool.reserve(numThreads);
 
-    auto job = [&](size_t numItems, const std::function<void(size_t idx)>& exec) {
+    auto job = [&](size_t numItems, const std::function<void(size_t)>& exec) {
         threadPool.clear();
         std::atomic<size_t> numFinishedItems = 0;
-        for (uint16_t i = 0; i < numThreads; ++i) {
-            threadPool.emplace_back([&] {
+        size_t numJobThreads = std::min(numThreads, numItems);
+        for (size_t i = 0; i < numJobThreads; ++i) {
+            threadPool.emplace_back([&, i] {
+                if (numItems <= numJobThreads) {
+                    exec(i);
+                    return;
+                }
+
                 while (true) {
                     size_t idx = numFinishedItems.fetch_add(1, std::memory_order::relaxed);
                     if (idx >= numItems) break;
