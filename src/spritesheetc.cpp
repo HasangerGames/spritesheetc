@@ -60,10 +60,10 @@ private:
 };
 
 struct Buffer {
-    char* data;
+    uint32_t* data;
     size_t size;
 
-    explicit Buffer(size_t size) : data(new char[size]), size(size) { }
+    explicit Buffer(size_t size) : data(new uint32_t[size]), size(size) { }
     ~Buffer() { delete[] data; }
 
     Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
@@ -182,12 +182,10 @@ std::unique_ptr<SpriteData> parseSprite(
         ));
     }
 
-    std::string filename = filePath.substr(filePath.find_last_of("/\\") + 1);
-    std::string name = filename.substr(0, filename.find_last_of('.'));
     int doublePadding = config.padding * 2;
 
     return std::make_unique<SpriteData>(
-        name,
+        std::filesystem::path(filePath).stem(),
         rectpack2D::rect_xywh(
             -1, -1,
             width + doublePadding, height + doublePadding
@@ -217,7 +215,7 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
         Atlas atlas = {
             .w = binWidth,
             .h = binHeight,
-            .pixels = Buffer(binWidth * binHeight * 4)
+            .pixels = Buffer(binWidth * binHeight)
         };
 
         for (size_t i = 0; i < sprites.size(); ) {
@@ -326,43 +324,41 @@ void encodePng(const Atlas& atlas, uint16_t i) {
     basisu::save_png(std::format("output/atlas{}.png", i + 1).c_str(), image);
 }
 
-void renderAtlas(Atlas& atlas, const SpritesheetBuilderConfig& config) {
-    char* atlasData = atlas.pixels.data;
+void renderAtlas(const Atlas& atlas, const SpritesheetBuilderConfig& config) {
+    uint32_t* atlasData = atlas.pixels.data;
 
-    Buffer spriteBuffer(atlas.spriteMaxW * atlas.spriteMaxH * 4);
-    char* spriteData = spriteBuffer.data;
+    Buffer spriteBuffer(atlas.spriteMaxW * atlas.spriteMaxH);
+    uint32_t* spriteData = spriteBuffer.data;
 
-    int atlasWidth = atlas.w;
-    ptrdiff_t atlasStride = atlasWidth * 4;
-    int doublePadding = config.padding * 2;
+    ptrdiff_t atlasWidth = atlas.w;
+    size_t doublePadding = config.padding * 2;
 
     resvg_transform transform = resvg_transform_identity();
-    for (size_t i = 0; i < atlas.sprites.size(); ++i) {
-        const Sprite& sprite = atlas.sprites[i];
 
+    for (const Sprite& sprite : atlas.sprites) {
         const Rect& rect = sprite.get_rect();
-        int width = rect.w - doublePadding;
-        int height = rect.h - doublePadding;
+        size_t width = rect.w - doublePadding;
+        size_t height = rect.h - doublePadding;
 
         // Zero out only the portion of the sprite buffer we need
-        std::memset(spriteData, 0, (size_t) width * height * 4);
+        std::memset(spriteData, 0, width * height * 4);
 
         resvg_render(
             sprite.tree(),
             transform,
             width,
             height,
-            spriteData
+            reinterpret_cast<char*>(spriteData)
         );
         resvg_tree_destroy(sprite.tree());
 
-        ptrdiff_t spriteStride = width * 4;
-        char* atlasOffset = atlasData + (ptrdiff_t) (rect.y * atlasWidth + rect.x) * 4;
-        char* spriteOffset = spriteData;
+        uint32_t* atlasOffset = atlasData + rect.x + (rect.y * atlasWidth);
+        uint32_t* spriteOffset = spriteData;
+        size_t rowBytes = width * 4;
         for (uint16_t y = 0; y < height; ++y) {
-            std::memcpy(atlasOffset, spriteOffset, spriteStride);
-            atlasOffset += atlasStride;
-            spriteOffset += spriteStride;
+            std::memcpy(atlasOffset, spriteOffset, rowBytes);
+            atlasOffset += atlasWidth;
+            spriteOffset += width;
         }
     }
 }
@@ -438,7 +434,9 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     Timer render;
     WebPConfig webpConfig;
     if (config.formats.contains(TextureFormat::Webp)) {
-        WebPConfigInit(&webpConfig);
+        if (WebPConfigInit(&webpConfig) == 0) {
+            throw SpritesheetBuilderException("WebP config version mismatch");
+        }
         webpConfig.method = config.encoderMethod;
         webpConfig.lossless = config.encoderLossless ? 1 : 0;
         webpConfig.quality = config.encoderQuality;
@@ -504,7 +502,6 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/normal"
         }),
         .formats = {TextureFormat::Webp},
-        .encoderMultithreading = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });
