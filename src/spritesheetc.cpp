@@ -63,21 +63,23 @@ private:
 struct Buffer {
     uint32_t* data;
     size_t size;
+    std::pmr::memory_resource* mem = nullptr;
 
     Buffer() : data(nullptr), size(0) { }
 
     explicit Buffer(std::pmr::memory_resource& mem, size_t size) :
         data(static_cast<uint32_t*>(mem.allocate(size * sizeof(uint32_t), alignof(uint32_t)))),
         size(size) { }
+    ~Buffer() { deallocate(); }
 
-    Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
+    Buffer(Buffer&& other) noexcept : data(other.data), size(other.size), mem(other.mem) {
         other.data = nullptr;
         other.size = 0;
     }
 
     Buffer& operator=(Buffer&& other) noexcept {
         if (this != &other) {
-            delete[] data;
+            deallocate();
             data = other.data;
             size = other.size;
             other.data = nullptr;
@@ -88,6 +90,10 @@ struct Buffer {
 
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
+
+    void deallocate() const {
+        if (mem != nullptr) mem->deallocate(data, size * sizeof(uint32_t), alignof(uint32_t));
+    }
 };
 
 using Job = std::function<void(Buffer&)>;
@@ -345,6 +351,9 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
     if (output == nullptr) {
         throw SpritesheetBuilderException("Unable to write to file: " + filename);
     }
+    constexpr size_t bufferSize = 1'000'000;
+    char* buffer = new char[bufferSize];
+    setvbuf(output, buffer, _IOFBF, bufferSize);
 
     picture.custom_ptr = output;
     picture.writer = [](const uint8_t* data, size_t size, const WebPPicture* picture) -> int {
@@ -358,6 +367,7 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
     }
 
     fclose(output);
+    delete[] buffer;
 
     WebPPictureFree(&picture);
 }
