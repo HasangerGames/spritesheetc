@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <latch>
 #include <iostream>
+#include <memory_resource>
+#include <queue>
 
 #include "basisu_comp.h"
 #include "resvg.h"
@@ -17,57 +19,7 @@
 
 #include "spritesheetc.h"
 
-#include <memory_resource>
-#include <queue>
-
 using namespace spritesheetc;
-
-using Job = std::function<void(std::pmr::memory_resource&)>;
-
-class ThreadPool {
-public:
-    ThreadPool(uint16_t numThreads) {
-        m_threads.reserve(numThreads);
-        for (uint16_t i = 0; i < numThreads; ++i) {
-            m_threads.emplace_back(&ThreadPool::threadLoop, this);
-        }
-    }
-    ~ThreadPool() { shutdown(); }
-
-    void queueJob(Job job) {
-        {
-            std::unique_lock lock(m_mutex);
-            m_jobs.push(std::move(job));
-        }
-        m_conditionVar.notify_one();
-    }
-
-    void shutdown() {
-        for (std::jthread& thread : m_threads) thread.request_stop();
-        m_conditionVar.notify_all();
-    }
-private:
-    void threadLoop(const std::stop_token& stopToken) {
-        std::pmr::unsynchronized_pool_resource mem;
-        while (true) {
-            Job job;
-            {
-                std::unique_lock lock(m_mutex);
-                m_conditionVar.wait(lock, [&] { return !m_jobs.empty() || stopToken.stop_requested(); });
-                if (stopToken.stop_requested()) return;
-                job = m_jobs.front();
-                m_jobs.pop();
-            }
-            job(mem);
-        }
-    }
-
-    std::vector<std::jthread> m_threads;
-    std::mutex m_mutex;
-    std::condition_variable m_conditionVar;
-    std::queue<Job> m_jobs;
-    bool m_shutdown = false;
-};
 
 class Timer {
 public:
@@ -138,6 +90,44 @@ struct Buffer {
     Buffer& operator=(const Buffer&) = delete;
 };
 
+using Job = std::function<void(Buffer&)>;
+
+class ThreadPool {
+public:
+    std::vector<std::jthread> threads;
+    std::mutex mutex;
+    std::condition_variable cVar;
+    std::queue<Job> jobs;
+
+    explicit ThreadPool(uint16_t numThreads) {
+        threads.reserve(numThreads);
+        for (uint16_t i = 0; i < numThreads; ++i) {
+            threads.emplace_back(&ThreadPool::threadLoop, this);
+        }
+    }
+    ~ThreadPool() { shutdown(); }
+
+    void shutdown() {
+        for (std::jthread& thread : threads) thread.request_stop();
+        cVar.notify_all();
+    }
+private:
+    void threadLoop(const std::stop_token& stopToken) {
+        thread_local Buffer buffer;
+        while (true) {
+            Job job;
+            {
+                std::unique_lock lock(mutex);
+                cVar.wait(lock, [&] { return !jobs.empty() || stopToken.stop_requested(); });
+                if (stopToken.stop_requested()) return;
+                job = jobs.front();
+                jobs.pop();
+            }
+            job(buffer);
+        }
+    }
+};
+
 using SpacesType = rectpack2D::empty_spaces<false>;
 using Rect = rectpack2D::output_rect_t<SpacesType>;
 
@@ -187,7 +177,6 @@ struct Sprite {
 struct Atlas {
     uint16_t w, h;
     Buffer pixels;
-    uint16_t spriteMaxW = 0, spriteMaxH = 0;
     std::vector<Sprite> sprites;
     Spritesheet spritesheet;
 };
@@ -249,7 +238,13 @@ std::unique_ptr<SpriteData> parseSprite(
     );
 }
 
-std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBuilderConfig& config, std::pmr::memory_resource& mem) {
+std::vector<Atlas> packAtlases(
+    std::vector<Sprite>& sprites,
+    uint16_t& spriteMaxW,
+    uint16_t& spriteMaxH,
+    const SpritesheetBuilderConfig& config,
+    std::pmr::memory_resource& mem
+) {
     std::vector<Atlas> atlases;
     constexpr auto insertCallback = [](auto&) {
         return rectpack2D::callback_result::CONTINUE_PACKING;
@@ -281,8 +276,8 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
                 continue;
             }
 
-            atlas.spriteMaxW = std::max((uint16_t) (rect.w - doublePadding), atlas.spriteMaxW);
-            atlas.spriteMaxH = std::max((uint16_t) (rect.h - doublePadding), atlas.spriteMaxH);
+            spriteMaxW = std::max((uint16_t) (rect.w - doublePadding), spriteMaxW);
+            spriteMaxH = std::max((uint16_t) (rect.h - doublePadding), spriteMaxH);
 
             atlas.spritesheet.frames[sprite->name] = {
                 .frame = {
@@ -301,13 +296,11 @@ std::vector<Atlas> packAtlases(std::vector<Sprite>& sprites, const SpritesheetBu
     return atlases;
 }
 
-void renderSprite(const Sprite& sprite, const Atlas& atlas, std::pmr::memory_resource& mem) {
+void renderSprite(const Sprite& sprite, const Atlas& atlas, const Buffer& spriteBuffer) {
     uint16_t width = sprite->width;
     uint16_t height = sprite->height;
-
-    Buffer spritePixels(mem, width * height);
-    uint32_t* spriteData = spritePixels.data;
-    std::memset(spriteData, 0, spritePixels.size * 4);
+    uint32_t* spriteData = spriteBuffer.data;
+    std::memset(spriteData, 0, width * height * 4);
 
     resvg_render(
         sprite->tree,
@@ -348,15 +341,15 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
     }
 
     std::string filename = std::format("output/atlas{}.webp", i + 1);
-    std::ofstream output{filename};
-    if (!output.good()) {
+    FILE* output = fopen(filename.c_str(), "wb");
+    if (output == nullptr) {
         throw SpritesheetBuilderException("Unable to write to file: " + filename);
     }
 
-    picture.custom_ptr = &output;
+    picture.custom_ptr = output;
     picture.writer = [](const uint8_t* data, size_t size, const WebPPicture* picture) -> int {
-        auto* output = static_cast<std::ofstream*>(picture->custom_ptr);
-        output->write(reinterpret_cast<const char*>(data), (std::streamsize) size);
+        auto* output = static_cast<FILE*>(picture->custom_ptr);
+        fwrite(data, size, 1, output);
         return 1;
     };
 
@@ -364,9 +357,9 @@ void encodeWebp(const Atlas& atlas, const WebPConfig& config, uint16_t i) {
         throw SpritesheetBuilderException("WebP encode failed");
     }
 
-    WebPPictureFree(&picture);
+    fclose(output);
 
-    output.close();
+    WebPPictureFree(&picture);
 }
 
 void encodeUastc(const Atlas& atlas, basist::basis_tex_format format, bool multithreaded, uint16_t i) {
@@ -448,11 +441,12 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     resvg_options* opt = resvg_options_create();
 
     for (size_t i = 0; i < numInputFiles; ++i) {
-        threadPool.queueJob([&, i](std::pmr::memory_resource&) {
+        threadPool.jobs.emplace([&, i](Buffer&) {
             sprites[i].data = parseSprite(config.inputFiles[i], opt, config);
             parseLatch.count_down();
         });
     }
+    threadPool.cVar.notify_all();
 
     parseLatch.wait();
     resvg_options_destroy(opt);
@@ -460,8 +454,9 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     // Phase 2: Pack sprites into atlases
     Timer pack;
+    uint16_t spriteMaxW = 0, spriteMaxH = 0;
     std::pmr::unsynchronized_pool_resource mem;
-    std::vector<Atlas> atlases = packAtlases(sprites, config, mem);
+    std::vector<Atlas> atlases = packAtlases(sprites, spriteMaxW, spriteMaxH, config, mem);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
     WebPConfig webpConfig;
@@ -475,39 +470,31 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     // Phase 3: Render sprites to atlases + encode atlases
     Timer render;
-    Timer encode(false);
-
-    std::latch renderLatch{(ptrdiff_t) numInputFiles};
-    std::latch encodeLatch{(ptrdiff_t) atlases.size()};
-
+    std::latch renderLatch{(ptrdiff_t) atlases.size()};
     std::vector<std::atomic<size_t>> remainingSprites(atlases.size());
 
     for (size_t i = 0; i < atlases.size(); ++i) {
         Atlas& atlas = atlases[i];
         remainingSprites[i] = atlas.sprites.size();
         for (const Sprite& sprite : atlas.sprites) {
-            threadPool.queueJob([&, i](std::pmr::memory_resource& spriteMem) {
-                renderSprite(sprite, atlas, spriteMem);
-                renderLatch.count_down();
+            threadPool.jobs.emplace([&, i](Buffer& spriteBuffer) {
+                if (spriteBuffer.size == 0) {
+                    thread_local std::pmr::unsynchronized_pool_resource spriteMem;
+                    spriteBuffer = Buffer(spriteMem, spriteMaxW * spriteMaxH);
+                }
+                renderSprite(sprite, atlas, spriteBuffer);
 
                 if (remainingSprites[i].fetch_sub(1, std::memory_order::relaxed) > 1) return;
 
-                threadPool.queueJob([&, i](std::pmr::memory_resource&) {
-                    encode.start();
-                    encodeAtlas(atlas, webpConfig, config, i);
-                    encodeLatch.count_down();
-                });
+                encodeAtlas(atlas, webpConfig, config, i);
+                renderLatch.count_down();
             });
         }
     }
+    threadPool.cVar.notify_all();
 
     renderLatch.wait();
-    render.stop(std::format("[spritesheetc] {} sprites rendered", numInputFiles), config.logStatus);
-
-    encodeLatch.wait();
-    encode.stop(std::format("[spritesheetc] {} atlases written", atlases.size()), config.logStatus);
-
-    threadPool.shutdown();
+    render.stop(std::format("[spritesheetc] {} atlases written", atlases.size()), config.logStatus);
 
     total.stop("[spritesheetc] Done. Total time", config.logStatus);
 }
@@ -563,7 +550,6 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/normal"
         }),
         .formats = {TextureFormat::Webp},
-        .encoderMultithreading = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });
