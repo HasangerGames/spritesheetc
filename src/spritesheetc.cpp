@@ -151,21 +151,12 @@ struct Spritesheet {
     SpritesheetFrames frames;
 };
 
-struct Atlas;
-
-struct SpriteData {
-    std::string name;
-    uint16_t width, height;
-    Rect rect;
-    resvg_render_tree* tree;
-};
-
 struct Sprite {
-    std::unique_ptr<SpriteData> data;
+    std::string name;
+    Rect rect;
+    resvg_render_tree* tree = nullptr;
 
-    SpriteData* operator->() const { return data.operator->(); }
-
-    [[nodiscard]] Rect& get_rect() const { return data->rect; }
+    [[nodiscard]] Rect& get_rect() { return rect; }
 };
 
 struct Atlas {
@@ -175,13 +166,13 @@ struct Atlas {
     Spritesheet spritesheet;
 };
 
-std::unique_ptr<SpriteData> parseSprite(
+void parseSprite(
     const std::string& filePath,
+    Sprite& sprite,
     resvg_options* opt,
     const SpritesheetBuilderConfig& config
 ) {
-    resvg_render_tree* tree;
-    auto err = (resvg_error) resvg_parse_tree_from_file(filePath.c_str(), opt, &tree);
+    auto err = (resvg_error) resvg_parse_tree_from_file(filePath.c_str(), opt, &sprite.tree);
     if (err != RESVG_OK) {
         std::string errorMessage;
         switch (err) {
@@ -209,8 +200,8 @@ std::unique_ptr<SpriteData> parseSprite(
         throw SpritesheetBuilderException(filePath + ": Failed to parse: " + errorMessage);
     }
 
-    resvg_size size = resvg_get_image_size(tree);
-    int width = std::ceil(size.width), height = std::ceil(size.height);
+    resvg_size size = resvg_get_image_size(sprite.tree);
+    uint16_t width = std::ceil(size.width), height = std::ceil(size.height);
     if (width > config.maxAtlasSize || height > config.maxAtlasSize) {
         throw SpritesheetBuilderException(std::format(
             "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}",
@@ -220,22 +211,17 @@ std::unique_ptr<SpriteData> parseSprite(
 
     int doublePadding = config.padding * 2;
 
-    return std::make_unique<SpriteData>(
-        std::filesystem::path(filePath).stem(),
-        width,
-        height,
-        rectpack2D::rect_xywh(
-            -1, -1,
-            width + doublePadding, height + doublePadding
-        ),
-        tree
+    sprite.name = std::filesystem::path(filePath).stem();
+    sprite.rect = rectpack2D::rect_xywh(
+        -1, -1,
+        width + doublePadding, height + doublePadding
     );
 }
 
 std::vector<Atlas> packAtlases(
     std::vector<Sprite>& sprites,
-    uint16_t& spriteMaxW,
-    uint16_t& spriteMaxH,
+    int& spriteMaxW,
+    int& spriteMaxH,
     const SpritesheetBuilderConfig& config
 ) {
     std::vector<Atlas> atlases;
@@ -263,16 +249,19 @@ std::vector<Atlas> packAtlases(
 
         for (size_t i = 0; i < sprites.size(); ) {
             Sprite& sprite = sprites[i];
-            const Rect& rect = sprite->rect;
+            Rect& rect = sprite.rect;
             if (rect.x == -1) { // -1 means sprite hasn't been packed yet
                 ++i;
                 continue;
             }
 
-            spriteMaxW = std::max((uint16_t) (rect.w - doublePadding), spriteMaxW);
-            spriteMaxH = std::max((uint16_t) (rect.h - doublePadding), spriteMaxH);
+            rect.w -= doublePadding;
+            rect.h -= doublePadding;
 
-            atlas.spritesheet.frames[sprite->name] = {
+            spriteMaxW = std::max(rect.w, spriteMaxW);
+            spriteMaxH = std::max(rect.h, spriteMaxH);
+
+            atlas.spritesheet.frames[sprite.name] = {
                 .frame = {
                     .x = (uint16_t) rect.x,
                     .y = (uint16_t) rect.y,
@@ -290,26 +279,26 @@ std::vector<Atlas> packAtlases(
 }
 
 void renderSprite(const Sprite& sprite, const Atlas& atlas, const Buffer& spriteBuffer) {
-    uint16_t width = sprite->width;
-    uint16_t height = sprite->height;
+    const Rect& rect = sprite.rect;
+    int width = rect.w, height = rect.h;
+
     uint32_t* spriteData = spriteBuffer.data;
     std::memset(spriteData, 0, width * height * 4);
 
     resvg_render(
-        sprite->tree,
+        sprite.tree,
         resvg_transform_identity(),
         width,
         height,
         reinterpret_cast<char*>(spriteData)
     );
-    resvg_tree_destroy(sprite->tree);
+    resvg_tree_destroy(sprite.tree);
 
     uint16_t atlasWidth = atlas.w;
-    const Rect& rect = sprite->rect;
     uint32_t* atlasData = atlas.pixels.data + rect.x + (rect.y * atlasWidth);
     uint16_t rowBytes = width * 4;
 
-    for (uint16_t y = 0; y < height; ++y) {
+    for (int y = 0; y < height; ++y) {
         std::memcpy(atlasData, spriteData, rowBytes);
         atlasData += atlasWidth;
         spriteData += width;
@@ -439,7 +428,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     for (size_t i = 0; i < numInputFiles; ++i) {
         threadPool.jobs.emplace([&, i](Buffer&) {
-            sprites[i].data = parseSprite(config.inputFiles[i], opt, config);
+            parseSprite(config.inputFiles[i], sprites[i], opt, config);
             parseLatch.count_down();
         });
     }
@@ -451,7 +440,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     // Phase 2: Pack sprites into atlases
     Timer pack;
-    uint16_t spriteMaxW = 0, spriteMaxH = 0;
+    int spriteMaxW = 0, spriteMaxH = 0;
     std::vector<Atlas> atlases = packAtlases(sprites, spriteMaxW, spriteMaxH, config);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
