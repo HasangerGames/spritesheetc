@@ -21,65 +21,22 @@
 
 using namespace spritesheetc;
 
-class Timer {
-public:
-    explicit Timer(bool autostart = true) {
-        if (autostart) start();
-    }
-
-    void start() {
-        if (m_started) {
-            return;
-        }
-        m_start = std::chrono::steady_clock::now();
-        m_started = true;
-    }
-
-    void stop(const std::string& label, bool enableLogging = true, double threshold = 0) {
-        if (!m_start.has_value()) {
-            std::cout << label << ": Invalid time\n";
-            return;
-        }
-
-        if (m_stopped) {
-            std::cout << label << ": Already stopped\n";
-            return;
-        }
-        m_stopped = true;
-
-        if (!enableLogging) return;
-
-        auto elapsed = std::chrono::steady_clock::now() - m_start.value();
-        auto ms = std::chrono::duration<double, std::milli>(elapsed).count();
-        if (ms < threshold) return;
-        std::cout << std::format("{}: {:.3f} ms\n", label, ms);
-    }
-private:
-    std::optional<std::chrono::steady_clock::time_point> m_start = std::nullopt;
-    bool m_started = false;
-    bool m_stopped = false;
-};
-
 struct Buffer {
     uint32_t* data;
     size_t size;
-    std::pmr::memory_resource* mem = nullptr;
 
     Buffer() : data(nullptr), size(0) { }
+    explicit Buffer(size_t size) : data(new uint32_t[size]), size(size) { }
+    ~Buffer() { delete[] data; }
 
-    explicit Buffer(std::pmr::memory_resource& mem, size_t size) :
-        data(static_cast<uint32_t*>(mem.allocate(size * sizeof(uint32_t), alignof(uint32_t)))),
-        size(size) { }
-    ~Buffer() { deallocate(); }
-
-    Buffer(Buffer&& other) noexcept : data(other.data), size(other.size), mem(other.mem) {
+    Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
         other.data = nullptr;
         other.size = 0;
     }
 
     Buffer& operator=(Buffer&& other) noexcept {
         if (this != &other) {
-            deallocate();
+            delete[] data;
             data = other.data;
             size = other.size;
             other.data = nullptr;
@@ -90,10 +47,6 @@ struct Buffer {
 
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
-
-    void deallocate() const {
-        if (mem != nullptr) mem->deallocate(data, size * sizeof(uint32_t), alignof(uint32_t));
-    }
 };
 
 using Job = std::function<void(Buffer&)>;
@@ -134,6 +87,41 @@ private:
     }
 };
 
+class Timer {
+public:
+    explicit Timer(bool autostart = true) {
+        if (autostart) start();
+    }
+
+    void start() {
+        if (m_start.has_value()) return;
+        m_start = std::chrono::steady_clock::now();
+    }
+
+    void stop(const std::string& label, bool enableLogging = true, double threshold = 0) {
+        if (!m_start.has_value()) {
+            std::cout << label << ": Invalid time\n";
+            return;
+        }
+
+        if (m_stopped) {
+            std::cout << label << ": Already stopped\n";
+            return;
+        }
+        m_stopped = true;
+
+        if (!enableLogging) return;
+
+        auto elapsed = std::chrono::steady_clock::now() - m_start.value();
+        auto ms = std::chrono::duration<double, std::milli>(elapsed).count();
+        if (ms < threshold) return;
+        std::cout << std::format("{}: {:.3f} ms\n", label, ms);
+    }
+private:
+    std::optional<std::chrono::steady_clock::time_point> m_start = std::nullopt;
+    bool m_stopped = false;
+};
+
 using SpacesType = rectpack2D::empty_spaces<false>;
 using Rect = rectpack2D::output_rect_t<SpacesType>;
 
@@ -152,8 +140,8 @@ struct SpritesheetFrame {
 
 struct SpritesheetMeta {
     std::string image;
-    float scale;
-    SpritesheetSize size;
+    float scale = 1.0f;
+    SpritesheetSize size{0, 0};
 };
 
 using SpritesheetFrames = std::unordered_map<std::string, SpritesheetFrame>;
@@ -248,8 +236,7 @@ std::vector<Atlas> packAtlases(
     std::vector<Sprite>& sprites,
     uint16_t& spriteMaxW,
     uint16_t& spriteMaxH,
-    const SpritesheetBuilderConfig& config,
-    std::pmr::memory_resource& mem
+    const SpritesheetBuilderConfig& config
 ) {
     std::vector<Atlas> atlases;
     constexpr auto insertCallback = [](auto&) {
@@ -271,7 +258,7 @@ std::vector<Atlas> packAtlases(
         Atlas& atlas = atlases.emplace_back(
             binWidth,
             binHeight,
-            Buffer(mem, binWidth * binHeight)
+            Buffer(binWidth * binHeight)
         );
 
         for (size_t i = 0; i < sprites.size(); ) {
@@ -465,8 +452,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     // Phase 2: Pack sprites into atlases
     Timer pack;
     uint16_t spriteMaxW = 0, spriteMaxH = 0;
-    std::pmr::unsynchronized_pool_resource mem;
-    std::vector<Atlas> atlases = packAtlases(sprites, spriteMaxW, spriteMaxH, config, mem);
+    std::vector<Atlas> atlases = packAtlases(sprites, spriteMaxW, spriteMaxH, config);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()), config.logStatus);
 
     WebPConfig webpConfig;
@@ -489,8 +475,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         for (const Sprite& sprite : atlas.sprites) {
             threadPool.jobs.emplace([&, i](Buffer& spriteBuffer) {
                 if (spriteBuffer.size == 0) {
-                    thread_local std::pmr::unsynchronized_pool_resource spriteMem;
-                    spriteBuffer = Buffer(spriteMem, spriteMaxW * spriteMaxH);
+                    spriteBuffer = Buffer(spriteMaxW * spriteMaxH);
                 }
                 renderSprite(sprite, atlas, spriteBuffer);
 
