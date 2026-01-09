@@ -4,7 +4,7 @@ project(spritesheetc)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -flto -funroll-loops -fprefetch-loop-arrays -march=native -mtune=native -frename-registers")
+set(CMAKE_CXX_FLAGS_RELEASE "-Ofast -DNDEBUG -flto -funroll-loops -fprefetch-loop-arrays -frename-registers")
 
 add_executable(spritesheetc src/spritesheetc.cpp)
 
