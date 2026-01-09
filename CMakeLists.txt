@@ -13,6 +13,8 @@ set(STATIC TRUE)
 add_subdirectory(vendored/basis_universal)
 target_include_directories(spritesheetc PRIVATE "${CMAKE_SOURCE_DIR}/vendored/basis_universal/encoder")
 
+add_subdirectory(vendored/concurrentqueue)
+
 add_subdirectory(vendored/glaze)
 
 set(WEBP_BUILD_ANIM_UTILS OFF CACHE INTERNAL "" FORCE)
@@ -39,6 +41,7 @@ set_target_properties(resvg PROPERTIES
 
 target_link_libraries(spritesheetc PRIVATE
     basisu_encoder
+    concurrentqueue
     glaze::glaze
     webp
     rectpack2D::rectpack2D

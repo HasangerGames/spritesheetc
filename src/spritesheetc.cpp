@@ -16,6 +16,7 @@
 #include "resvg.h"
 #include "rectpack2D/finders_interface.h"
 #include "webp/encode.h"
+#include "blockingconcurrentqueue.h"
 
 #include "spritesheetc.h"
 
@@ -53,38 +54,48 @@ using Job = std::function<void(Buffer&)>;
 
 class ThreadPool {
 public:
-    std::vector<std::jthread> threads;
-    std::mutex mutex;
-    std::condition_variable cVar;
-    std::queue<Job> jobs;
-
     explicit ThreadPool(uint16_t numThreads) {
-        threads.reserve(numThreads);
+        m_threads.reserve(numThreads);
         for (uint16_t i = 0; i < numThreads; ++i) {
-            threads.emplace_back(&ThreadPool::threadLoop, this);
+            m_threads.emplace_back(&ThreadPool::threadLoop, this);
         }
     }
     ~ThreadPool() { shutdown(); }
 
-    void shutdown() {
-        for (std::jthread& thread : threads) thread.request_stop();
-        cVar.notify_all();
-    }
-private:
-    void threadLoop(const std::stop_token& stopToken) {
-        thread_local Buffer buffer;
-        while (true) {
-            Job job;
-            {
-                std::unique_lock lock(mutex);
-                cVar.wait(lock, [&] { return !jobs.empty() || stopToken.stop_requested(); });
-                if (stopToken.stop_requested()) return;
-                job = jobs.front();
-                jobs.pop();
-            }
-            job(buffer);
+    void queueJobsAndWait(std::vector<Job>& jobs) {
+        size_t current = m_remainingJobs = jobs.size();
+        m_queue.enqueue_bulk(m_producerToken, std::make_move_iterator(jobs.begin()), jobs.size());
+        while (current > 0) {
+            m_remainingJobs.wait(current, std::memory_order_acquire);
+            current = m_remainingJobs.load(std::memory_order_acquire);
         }
     }
+
+    void shutdown() {
+        // Queue null jobs to shut down threads
+        for (size_t i = 0; i < m_threads.size(); ++i) {
+            m_queue.enqueue(nullptr);
+        }
+    }
+private:
+    void threadLoop() {
+        Buffer buffer;
+        moodycamel::ConsumerToken consumerToken(m_queue);
+        while (true) {
+            Job job;
+            m_queue.wait_dequeue(consumerToken, job);
+            if (job == nullptr) return; // null job = shutdown signal
+            job(buffer);
+            if (m_remainingJobs.fetch_sub(1, std::memory_order::acq_rel) == 1) {
+                m_remainingJobs.notify_one();
+            }
+        }
+    }
+
+    moodycamel::BlockingConcurrentQueue<Job> m_queue;
+    moodycamel::ProducerToken m_producerToken{m_queue};
+    std::atomic<size_t> m_remainingJobs;
+    std::vector<std::jthread> m_threads;
 };
 
 class Timer {
@@ -413,28 +424,27 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         throw SpritesheetBuilderException("Output path does not exist or is not a directory: " + config.outputDirectory);
     }
 
+    size_t numInputFiles = config.inputFiles.size();
+
     uint16_t numThreads = config.builderThreads == 0
         ? std::max(1u, std::thread::hardware_concurrency())
         : config.builderThreads;
     ThreadPool threadPool{numThreads};
-
-    size_t numInputFiles = config.inputFiles.size();
+    std::vector<Job> jobs;
+    jobs.reserve(numInputFiles);
 
     // Phase 1: Parse sprites
     Timer parse;
     std::vector<Sprite> sprites{numInputFiles};
-    std::latch parseLatch{(ptrdiff_t) numInputFiles};
     resvg_options* opt = resvg_options_create();
 
     for (size_t i = 0; i < numInputFiles; ++i) {
-        threadPool.jobs.emplace([&, i](Buffer&) {
+        jobs.emplace_back([&, i](Buffer&) {
             parseSprite(config.inputFiles[i], sprites[i], opt, config);
-            parseLatch.count_down();
         });
     }
-    threadPool.cVar.notify_all();
+    threadPool.queueJobsAndWait(jobs);
 
-    parseLatch.wait();
     resvg_options_destroy(opt);
     parse.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles), config.logStatus);
 
@@ -455,29 +465,28 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     // Phase 3: Render sprites to atlases + encode atlases
     Timer render;
-    std::latch renderLatch{(ptrdiff_t) atlases.size()};
     std::vector<std::atomic<size_t>> remainingSprites(atlases.size());
 
+    jobs.clear();
     for (size_t i = 0; i < atlases.size(); ++i) {
         Atlas& atlas = atlases[i];
-        remainingSprites[i] = atlas.sprites.size();
+        size_t spritesInAtlas = atlas.sprites.size();
+        remainingSprites[i] = spritesInAtlas;
         for (const Sprite& sprite : atlas.sprites) {
-            threadPool.jobs.emplace([&, i](Buffer& spriteBuffer) {
+            jobs.emplace_back([&, i](Buffer& spriteBuffer) {
                 if (spriteBuffer.size == 0) {
                     spriteBuffer = Buffer(spriteMaxW * spriteMaxH);
                 }
                 renderSprite(sprite, atlas, spriteBuffer);
 
-                if (remainingSprites[i].fetch_sub(1, std::memory_order::relaxed) > 1) return;
-
-                encodeAtlas(atlas, webpConfig, config, i);
-                renderLatch.count_down();
+                if (remainingSprites[i].fetch_sub(1, std::memory_order::acq_rel) == 1) {
+                    encodeAtlas(atlas, webpConfig, config, i);
+                }
             });
         }
     }
-    threadPool.cVar.notify_all();
+    threadPool.queueJobsAndWait(jobs);
 
-    renderLatch.wait();
     render.stop(std::format("[spritesheetc] {} atlases written", atlases.size()), config.logStatus);
 
     total.stop("[spritesheetc] Done. Total time", config.logStatus);
@@ -534,6 +543,7 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/normal"
         }),
         .formats = {TextureFormat::Webp},
+        .encoderMultithreading = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });

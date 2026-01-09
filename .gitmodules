@@ -13,3 +13,6 @@
 [submodule "vendored/basis_universal"]
 	path = vendored/basis_universal
 	url = https://github.com/BinomialLLC/basis_universal.git
+[submodule "vendored/concurrentqueue"]
+	path = vendored/concurrentqueue
+	url = https://github.com/cameron314/concurrentqueue.git
