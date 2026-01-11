@@ -16,3 +16,12 @@
 [submodule "vendored/concurrentqueue"]
 	path = vendored/concurrentqueue
 	url = https://github.com/cameron314/concurrentqueue.git
+[submodule "vendored/libspng"]
+	path = vendored/libspng
+	url = https://github.com/randy408/libspng.git
+[submodule "vendored/zlib-ng"]
+	path = vendored/zlib-ng
+	url = https://github.com/zlib-ng/zlib-ng.git
+[submodule "vendored/xxHash"]
+	path = vendored/xxHash
+	url = https://github.com/Cyan4973/xxHash.git

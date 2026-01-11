@@ -8,6 +8,8 @@ set(CMAKE_CXX_FLAGS_RELEASE "-Ofast -DNDEBUG -flto -funroll-loops -fprefetch-loo
 
 add_executable(spritesheetc src/spritesheetc.cpp)
 
+target_compile_options(spritesheetc PRIVATE -msse4.1)
+
 set(EXAMPLES FALSE)
 set(STATIC TRUE)
 add_subdirectory(vendored/basis_universal)
@@ -16,6 +18,10 @@ target_include_directories(spritesheetc PRIVATE "${CMAKE_SOURCE_DIR}/vendored/ba
 add_subdirectory(vendored/concurrentqueue)
 
 add_subdirectory(vendored/glaze)
+
+set(BUILD_EXAMPLES OFF CACHE INTERNAL "" FORCE)
+set(SPNG_SHARED    OFF CACHE INTERNAL "" FORCE)
+add_subdirectory(vendored/libspng)
 
 set(WEBP_BUILD_ANIM_UTILS OFF CACHE INTERNAL "" FORCE)
 set(WEBP_BUILD_CWEBP      OFF CACHE INTERNAL "" FORCE)
@@ -39,11 +45,21 @@ set_target_properties(resvg PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
+add_subdirectory(vendored/xxHash/build/cmake)
+
+set(ZLIB_COMPAT ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+add_subdirectory(vendored/zlib-ng)
+message(STATUS "Zlib-ng target type: ${ZLIB_INSTALL_LIBRARIES}")
+
 target_link_libraries(spritesheetc PRIVATE
     basisu_encoder
     concurrentqueue
     glaze::glaze
+    zlib-ng-static
+    spng_static
     webp
     rectpack2D::rectpack2D
     resvg
+    xxhash
 )
