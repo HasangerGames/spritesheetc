@@ -17,6 +17,7 @@
 #include "spng.h"
 #include "rectpack2D/finders_interface.h"
 #include "webp/encode.h"
+#include "blockingconcurrentqueue.h"
 #include "xxhash.h"
 #include "glaze/glaze.hpp"
 
@@ -53,7 +54,7 @@ struct Buffer {
     Buffer& operator=(const Buffer&) = delete;
 };
 
-using Job = std::function<void(size_t, Buffer<uint32_t>&)>;
+using Job = std::function<void(Buffer<uint32_t>&)>;
 
 class ThreadPool {
 public:
@@ -63,46 +64,41 @@ public:
             m_threads.emplace_back(&ThreadPool::threadLoop, this);
         }
     }
-    ~ThreadPool() {
-        for (std::jthread& thread : m_threads) thread.request_stop();
-        // wake up the threads
-        ++m_jobIdx;
-        m_jobIdx.notify_all();
+    ~ThreadPool() { shutdown(); }
+
+    void queueJobsAndWait(std::vector<Job>& jobs) {
+        size_t current = m_remainingJobs = jobs.size();
+        m_queue.enqueue_bulk(m_producerToken, std::make_move_iterator(jobs.begin()), jobs.size());
+        while (current > 0) {
+            m_remainingJobs.wait(current, std::memory_order_acquire);
+            current = m_remainingJobs.load(std::memory_order_acquire);
+        }
     }
 
-    void queueJob(size_t numItems, Job job) {
-        m_currentJob = std::move(job);
-        m_currentIdx = 0;
-        m_numItems = numItems;
-        m_latch = std::make_unique<std::latch>((ptrdiff_t) numItems);
-        ++m_jobIdx;
-        m_jobIdx.notify_all();
-        m_latch->wait();
+    void shutdown() {
+        // Queue null jobs to shut down threads
+        for (size_t i = 0; i < m_threads.size(); ++i) {
+            m_queue.enqueue(nullptr);
+        }
     }
 private:
-    void threadLoop(const std::stop_token& stopToken) {
+    void threadLoop() {
         Buffer<uint32_t> buffer;
-        size_t lastJobIdx = 0;
+        moodycamel::ConsumerToken consumerToken(m_queue);
         while (true) {
-            m_jobIdx.wait(lastJobIdx);
-            if (stopToken.stop_requested()) return;
-            lastJobIdx = m_jobIdx;
-
-            while (true) {
-                size_t idx = m_currentIdx.fetch_add(1, std::memory_order_relaxed);
-                if (idx >= m_numItems) break;
-
-                m_currentJob(idx, buffer);
-                m_latch->count_down();
+            Job job;
+            m_queue.wait_dequeue(consumerToken, job);
+            if (job == nullptr) return; // null job = shutdown signal
+            job(buffer);
+            if (m_remainingJobs.fetch_sub(1, std::memory_order::acq_rel) == 1) {
+                m_remainingJobs.notify_one();
             }
         }
     }
 
-    Job m_currentJob;
-    std::atomic<size_t> m_currentIdx;
-    size_t m_numItems;
-    std::atomic<size_t> m_jobIdx = 0;
-    std::unique_ptr<std::latch> m_latch;
+    moodycamel::BlockingConcurrentQueue<Job> m_queue;
+    moodycamel::ProducerToken m_producerToken{m_queue};
+    std::atomic<size_t> m_remainingJobs;
     std::vector<std::jthread> m_threads;
 };
 
@@ -166,14 +162,11 @@ struct Spritesheet {
     SpritesheetFrames frames;
 };
 
-struct Atlas;
-
 struct Sprite {
     Buffer<char> data;
     std::string name;
     Rect rect;
     resvg_render_tree* tree = nullptr;
-    Atlas* atlas;
 
     [[nodiscard]] Rect& get_rect() { return rect; }
 };
@@ -182,6 +175,7 @@ struct Atlas {
     uint16_t w, h;
     Buffer<uint32_t> pixels;
     size_t id;
+    std::vector<Sprite> sprites;
     std::atomic<size_t> spritesToBeRendered;
     std::unordered_map<float, Spritesheet> spritesheets;
 };
@@ -257,8 +251,7 @@ void parseSprite(
 }
 
 std::deque<Atlas> packAtlases(
-    std::vector<Sprite>& unpackedSprites,
-    std::vector<Sprite>& packedSprites,
+    std::vector<Sprite>& sprites,
     int& spriteMaxW,
     int& spriteMaxH,
     const SpritesheetBuilderConfig& config
@@ -278,8 +271,8 @@ std::deque<Atlas> packAtlases(
     );
 
     size_t atlasIdx = 0;
-    while (!unpackedSprites.empty()) {
-        rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(unpackedSprites, finderInput);
+    while (!sprites.empty()) {
+        rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
 
         uint16_t binWidth = result.w - doublePadding;
         uint16_t binHeight = result.h - doublePadding;
@@ -300,9 +293,8 @@ std::deque<Atlas> packAtlases(
             atlas.spritesheets.emplace(scale, spritesheet);
         }
 
-        size_t spritesInAtlas = 0;
-        for (size_t i = 0; i < unpackedSprites.size(); ) {
-            Sprite& sprite = unpackedSprites[i];
+        for (size_t i = 0; i < sprites.size(); ) {
+            Sprite& sprite = sprites[i];
             Rect& rect = sprite.rect;
             if (rect.x == -1) { // -1 means sprite hasn't been packed yet
                 ++i;
@@ -315,15 +307,12 @@ std::deque<Atlas> packAtlases(
             spriteMaxW = std::max(rect.w, spriteMaxW);
             spriteMaxH = std::max(rect.h, spriteMaxH);
 
-            ++spritesInAtlas;
-            sprite.atlas = &atlas;
-
-            packedSprites.push_back(std::move(sprite));
-            unpackedSprites[i] = std::move(unpackedSprites.back());
-            unpackedSprites.pop_back();
+            atlas.sprites.push_back(std::move(sprite));
+            sprites[i] = std::move(sprites.back());
+            sprites.pop_back();
         }
 
-        atlas.spritesToBeRendered = spritesInAtlas;
+        atlas.spritesToBeRendered = atlas.sprites.size();
     }
     return atlases;
 }
@@ -551,15 +540,20 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
         ? std::max(1u, std::thread::hardware_concurrency())
         : config.builderThreads;
     ThreadPool threadPool{numThreads};
+    std::vector<Job> jobs;
+    jobs.reserve(numInputFiles);
+    std::vector<Sprite> sprites{numInputFiles};
 
     // Phase 1: Hash sprites + check cache
     Timer load{config};
-    std::vector<Sprite> unpackedSprites{numInputFiles};
     Buffer<XXH64_hash_t> hashes{numInputFiles};
 
-    threadPool.queueJob(numInputFiles, [&](size_t i, Buffer<uint32_t>&) {
-        loadSprite(config.inputFiles[i], unpackedSprites[i], hashes.data[i]);
-    });
+    for (size_t i = 0; i < numInputFiles; ++i) {
+        jobs.emplace_back([&, i](Buffer<uint32_t>&) {
+            loadSprite(config.inputFiles[i], sprites[i], hashes.data[i]);
+        });
+    }
+    threadPool.queueJobsAndWait(jobs);
 
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
@@ -595,37 +589,43 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     Timer parse{config};
     resvg_options* opt = resvg_options_create();
 
-    threadPool.queueJob(numInputFiles, [&](size_t i, Buffer<uint32_t>&) {
-        parseSprite(config.inputFiles[i], unpackedSprites[i], opt, config);
-    });
+    jobs.clear();
+    for (size_t i = 0; i < numInputFiles; ++i) {
+        jobs.emplace_back([&, i](Buffer<uint32_t>&) {
+            parseSprite(config.inputFiles[i], sprites[i], opt, config);
+        });
+    }
+    threadPool.queueJobsAndWait(jobs);
 
     resvg_options_destroy(opt);
     parse.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles));
 
     // Phase 3: Pack sprites into atlases
     Timer pack{config};
-    std::vector<Sprite> packedSprites;
-    packedSprites.reserve(numInputFiles);
     int spriteMaxW = 0, spriteMaxH = 0;
-    std::deque<Atlas> atlases = packAtlases(unpackedSprites, packedSprites, spriteMaxW, spriteMaxH, config);
+    std::deque<Atlas> atlases = packAtlases(sprites, spriteMaxW, spriteMaxH, config);
     pack.stop(std::format("[spritesheetc] {} atlases packed", atlases.size()));
 
     // Phase 4: Render sprites to atlases + encode atlases
     Timer render{config};
     bool multithreading = config.encoderMultithreading && atlases.size() < numThreads;
 
-    threadPool.queueJob(numInputFiles, [&](size_t i, Buffer<uint32_t>& spriteBuffer) {
-        if (spriteBuffer.size == 0) {
-            spriteBuffer = Buffer<uint32_t>(spriteMaxW * spriteMaxH);
-        }
-        Sprite& sprite = packedSprites[i];
-        Atlas& atlas = *sprite.atlas;
-        renderSprite(sprite, atlas, spriteBuffer, config);
+    jobs.clear();
+    for (Atlas& atlas : atlases) {
+        for (const Sprite& sprite : atlas.sprites) {
+            jobs.emplace_back([&](Buffer<uint32_t>& spriteBuffer) {
+                if (spriteBuffer.size == 0) {
+                    spriteBuffer = Buffer<uint32_t>(spriteMaxW * spriteMaxH);
+                }
+                renderSprite(sprite, atlas, spriteBuffer, config);
 
-        if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
-            encodeAtlas(atlas, config, hash, multithreading);
+                if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
+                    encodeAtlas(atlas, config, hash, multithreading);
+                }
+            });
         }
-    });
+    }
+    threadPool.queueJobsAndWait(jobs);
 
     render.stop(std::format("[spritesheetc] {} atlases written", atlases.size()));
 
