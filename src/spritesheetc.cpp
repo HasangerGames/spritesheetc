@@ -144,7 +144,7 @@ struct SpritesheetSize {
 struct SpritesheetFrame {
     SpritesheetRect frame;
     SpritesheetSize sourceSize;
-    SpritesheetSize spriteSourceSize;
+    SpritesheetRect spriteSourceSize;
     bool rotated;
     bool trimmed;
 };
@@ -165,6 +165,9 @@ struct Spritesheet {
 struct Sprite {
     Buffer<char> data;
     std::string name;
+    uint16_t width, height;
+    float bboxX = 0, bboxY = 0;
+    bool trimmed;
     Rect rect;
     resvg_render_tree* tree = nullptr;
 
@@ -180,10 +183,6 @@ struct Atlas {
     std::unordered_map<float, Spritesheet> spritesheets;
 };
 
-uint16_t coord(int val, float scale) {
-    return (uint16_t) std::round((float) val * scale);
-}
-
 void loadSprite(const std::string& filePath, Sprite& sprite, XXH64_hash_t& hash) {
     std::ifstream input{filePath, std::ios::binary};
 
@@ -195,7 +194,7 @@ void loadSprite(const std::string& filePath, Sprite& sprite, XXH64_hash_t& hash)
     char* spriteData = sprite.data.data;
     input.read(spriteData, fileSize);
 
-    hash = XXH64(spriteData, fileSize, 0);
+    hash = XXH64(spriteData, fileSize, 0) ^ XXH64(filePath.data(), filePath.size(), 0);
 }
 
 void parseSprite(
@@ -241,13 +240,36 @@ void parseSprite(
         ));
     }
 
-    int doublePadding = config.padding * 2;
-
     sprite.name = std::filesystem::path(filePath).stem();
-    sprite.rect = rectpack2D::rect_xywh(
-        -1, -1,
-        width + doublePadding, height + doublePadding
-    );
+    sprite.width = width;
+    sprite.height = height;
+
+    if (config.allowTrimming) {
+        resvg_rect bbox;
+        resvg_get_image_bbox(sprite.tree, &bbox);
+        float bx = std::floor(bbox.x);
+        float by = std::floor(bbox.y);
+        float bWidth = std::min((float) width, std::ceil(bbox.width));
+        float bHeight = std::min((float) height, std::ceil(bbox.height));
+        if (bx > 0 || by > 0 || bWidth < width || bHeight < height) {
+            sprite.trimmed = true;
+            sprite.bboxX = bx;
+            sprite.bboxY = by;
+            width = bWidth;
+            height = bHeight;
+        }
+    }
+    width += config.padding * 2;
+    height += config.padding * 2;
+    sprite.rect = rectpack2D::rect_xywh(-1, -1, width, height); // -1 means rect hasn't been packed yet
+}
+
+uint16_t floor(int val, float scale) {
+    return std::floor((float) val * scale);
+}
+
+uint16_t ceil(int val, float scale) {
+    return std::ceil((float) val * scale);
 }
 
 std::deque<Atlas> packAtlases(
@@ -286,8 +308,8 @@ std::deque<Atlas> packAtlases(
         for (float scale : config.resolutions) {
             Spritesheet spritesheet;
             spritesheet.meta.size = {
-                .w = coord(binWidth, scale),
-                .h = coord(binHeight, scale),
+                .w = ceil(binWidth, scale),
+                .h = ceil(binHeight, scale),
             };
             spritesheet.meta.scale = scale;
             atlas.spritesheets.emplace(scale, spritesheet);
@@ -320,25 +342,30 @@ std::deque<Atlas> packAtlases(
 void renderSprite(
     const Sprite& sprite,
     Atlas& atlas,
-    const Buffer<uint32_t>& spriteBuffer,
-    const SpritesheetBuilderConfig& config
+    const Buffer<uint32_t>& spriteBuffer
 ) {
     const Rect& rect = sprite.rect;
 
     for (auto& [scale, spritesheet] : atlas.spritesheets) {
         spritesheet.frames[sprite.name] = {
             .frame = {
-                .x = coord(rect.x, scale),
-                .y = coord(rect.y, scale),
-                .w = coord(rect.w, scale),
-                .h = coord(rect.h, scale),
+                .x = floor(rect.x, scale),
+                .y = floor(rect.y, scale),
+                .w = ceil(rect.w, scale),
+                .h = ceil(rect.h, scale),
             },
             .sourceSize = {
-                .w = coord(rect.w, scale),
-                .h = coord(rect.h, scale),
+                .w = ceil(sprite.width, scale),
+                .h = ceil(sprite.height, scale),
+            },
+            .spriteSourceSize = {
+                .x = floor(sprite.bboxX, scale),
+                .y = floor(sprite.bboxY, scale),
+                .w = ceil(rect.w, scale),
+                .h = ceil(rect.h, scale),
             },
             .rotated = false,
-            .trimmed = false,
+            .trimmed = sprite.trimmed,
         };
     }
 
@@ -346,9 +373,12 @@ void renderSprite(
     uint32_t* spriteData = spriteBuffer.data;
     std::memset(spriteData, 0, width * height * 4);
 
+    resvg_transform transform = resvg_transform_identity();
+    transform.e = -sprite.bboxX;
+    transform.f = -sprite.bboxY;
     resvg_render(
         sprite.tree,
-        resvg_transform_identity(),
+        transform,
         width,
         height,
         reinterpret_cast<char*>(spriteData)
@@ -544,7 +574,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
     jobs.reserve(numInputFiles);
     std::vector<Sprite> sprites{numInputFiles};
 
-    // Phase 1: Hash sprites + check cache
+    // Phase 1: Load sprites
     Timer load{config};
     Buffer<XXH64_hash_t> hashes{numInputFiles};
 
@@ -617,7 +647,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
                 if (spriteBuffer.size == 0) {
                     spriteBuffer = Buffer<uint32_t>(spriteMaxW * spriteMaxH);
                 }
-                renderSprite(sprite, atlas, spriteBuffer, config);
+                renderSprite(sprite, atlas, spriteBuffer);
 
                 if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
                     encodeAtlas(atlas, config, hash, multithreading);
