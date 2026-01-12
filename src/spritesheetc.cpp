@@ -23,6 +23,8 @@
 
 #include "spritesheetc.h"
 
+#include <pstl/glue_execution_defs.h>
+
 using namespace spritesheetc;
 
 template<typename T>
@@ -134,11 +136,11 @@ using SpacesType = rectpack2D::empty_spaces<false>;
 using Rect = rectpack2D::output_rect_t<SpacesType>;
 
 struct SpritesheetRect {
-    uint16_t x, y, w, h;
+    int16_t x, y, w, h;
 };
 
 struct SpritesheetSize {
-    uint16_t w, h;
+    int16_t w, h;
 };
 
 struct SpritesheetFrame {
@@ -264,11 +266,11 @@ void parseSprite(
     sprite.rect = rectpack2D::rect_xywh(-1, -1, width, height); // -1 means rect hasn't been packed yet
 }
 
-uint16_t floor(int val, float scale) {
+int16_t floor(int val, float scale) {
     return std::floor((float) val * scale);
 }
 
-uint16_t ceil(int val, float scale) {
+int16_t ceil(int val, float scale) {
     return std::ceil((float) val * scale);
 }
 
@@ -296,8 +298,8 @@ std::deque<Atlas> packAtlases(
     while (!sprites.empty()) {
         rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
 
-        uint16_t binWidth = result.w - doublePadding;
-        uint16_t binHeight = result.h - doublePadding;
+        int16_t binWidth = result.w - doublePadding;
+        int16_t binHeight = result.h - doublePadding;
         Atlas& atlas = atlases.emplace_back(
             binWidth,
             binHeight,
@@ -342,7 +344,8 @@ std::deque<Atlas> packAtlases(
 void renderSprite(
     const Sprite& sprite,
     Atlas& atlas,
-    const Buffer<uint32_t>& spriteBuffer
+    const Buffer<uint32_t>& spriteBuffer,
+    bool argb
 ) {
     const Rect& rect = sprite.rect;
 
@@ -385,18 +388,41 @@ void renderSprite(
     );
     resvg_tree_destroy(sprite.tree);
 
+    // resvg outputs premultiplied alpha,
+    // so we need to un-premultiply it before passing to the encoder or it'll cause artifacts.
+    // also, if we're only outputting webp,
+    // we can convert to argb (the format libwebp accepts) now to avoid a second conversion later.
     uint16_t atlasWidth = atlas.w;
     uint32_t* atlasData = atlas.pixels.data + rect.x + (rect.y * atlasWidth);
-    uint16_t rowBytes = width * 4;
-
     for (int y = 0; y < height; ++y) {
-        std::memcpy(atlasData, spriteData, rowBytes);
+        for (int x = 0; x < width; ++x) {
+            uint32_t pixel = spriteData[x];
+            uint8_t r, g, b;
+            uint8_t a = pixel >> 24;
+            if (a == 0 || a == 255) { // skip un-premultiplying if alpha is 0 or 255
+                r = pixel;
+                g = pixel >> 8;
+                b = pixel >> 16;
+            } else {
+                auto unmultiply = [a](uint8_t c) -> uint8_t {
+                    return ((uint32_t) c * 255 + (a / 2)) / a;
+                };
+                r = unmultiply(pixel);
+                g = unmultiply(pixel >> 8);
+                b = unmultiply(pixel >> 16);
+            }
+            if (argb) {
+                atlasData[x] = a << 24 | r << 16 | g << 8 | b;
+            } else {
+                atlasData[x] = a << 24 | b << 16 | g << 8 | r;
+            }
+        }
         atlasData += atlasWidth;
         spriteData += width;
     }
 }
 
-void encodeWebp(const Atlas& atlas, FILE* file, const WebPConfig& config) {
+void encodeWebp(const Atlas& atlas, FILE* file, const WebPConfig& config, bool argb) {
     WebPPicture picture;
     if (WebPPictureInit(&picture) == 0) {
         throw SpritesheetBuilderException("WebP picture init failed");
@@ -405,7 +431,10 @@ void encodeWebp(const Atlas& atlas, FILE* file, const WebPConfig& config) {
     picture.height = atlas.h;
     picture.use_argb = 1;
 
-    if (WebPPictureImportRGBA(
+    if (argb) {
+        picture.argb = atlas.pixels.data;
+        picture.argb_stride = atlas.w;
+    } else if (WebPPictureImportRGBA(
         &picture,
         reinterpret_cast<const uint8_t*>(atlas.pixels.data),
         atlas.w * 4
@@ -496,6 +525,7 @@ void encodeAtlas(
     Atlas& atlas,
     const SpritesheetBuilderConfig& config,
     XXH64_hash_t hash,
+    bool argb,
     bool multithreading
 ) {
     WebPConfig webpConfig;
@@ -539,7 +569,7 @@ void encodeAtlas(
                 encodeKtx2(atlas, file, basist::basis_tex_format::cUASTC4x4, multithreading);
                 break;
             case TextureFormat::Webp:
-                encodeWebp(atlas, file, webpConfig);
+                encodeWebp(atlas, file, webpConfig, argb);
                 break;
             case TextureFormat::Png:
                 encodePng(atlas, file);
@@ -638,6 +668,7 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
 
     // Phase 4: Render sprites to atlases + encode atlases
     Timer render{config};
+    bool argb = config.formats.size() == 1 && config.formats.contains(TextureFormat::Webp);
     bool multithreading = config.encoderMultithreading && atlases.size() < numThreads;
 
     jobs.clear();
@@ -647,10 +678,10 @@ void buildSpritesheets(const SpritesheetBuilderConfig& config) {
                 if (spriteBuffer.size == 0) {
                     spriteBuffer = Buffer<uint32_t>(spriteMaxW * spriteMaxH);
                 }
-                renderSprite(sprite, atlas, spriteBuffer);
+                renderSprite(sprite, atlas, spriteBuffer, argb);
 
                 if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
-                    encodeAtlas(atlas, config, hash, multithreading);
+                    encodeAtlas(atlas, config, hash, argb, multithreading);
                 }
             });
         }
@@ -712,6 +743,7 @@ int main(int argc, char* argv[]) {
             "../../Suroi/client/public/img/game/shared",
             "../../Suroi/client/public/img/game/normal"
         }),
+        .cache = false,
         .encoderQuality = 0,
         .encoderMethod = 0,
     });
