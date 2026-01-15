@@ -132,7 +132,7 @@ private:
     bool m_disabled;
 };
 
-using SpacesType = rectpack2D::empty_spaces<false>;
+using SpacesType = rectpack2D::empty_spaces<true>;
 using Rect = rectpack2D::output_rect_t<SpacesType>;
 
 struct SpritesheetRect {
@@ -167,9 +167,9 @@ struct Spritesheet {
 struct Sprite {
     Buffer<char> data;
     std::string name;
-    uint16_t width, height;
+    uint16_t width = 0, height = 0;
     float bboxX = 0, bboxY = 0;
-    bool trimmed;
+    bool trimmed = false;
     Rect rect;
     resvg_render_tree* tree = nullptr;
 
@@ -253,14 +253,15 @@ void parseSprite(
         float by = std::floor(bbox.y);
         float bWidth = std::min((float) width, std::ceil(bbox.width));
         float bHeight = std::min((float) height, std::ceil(bbox.height));
-        if (bx > 0 || by > 0 || bWidth < width || bHeight < height) {
+        if (bx > 0 || by > 0 || bWidth < (float) width || bHeight < (float) height) {
             sprite.trimmed = true;
             sprite.bboxX = bx;
             sprite.bboxY = by;
-            width = bWidth;
-            height = bHeight;
+            width = (uint16_t) bWidth;
+            height = (uint16_t) bHeight;
         }
     }
+
     width += config.padding * 2;
     height += config.padding * 2;
     sprite.rect = rectpack2D::rect_xywh(-1, -1, width, height); // -1 means rect hasn't been packed yet
@@ -291,15 +292,17 @@ std::deque<Atlas> packAtlases(
         config.packingQuality,
         insertCallback,
         insertCallback,
-        rectpack2D::flipping_option::DISABLED
+        config.allowRotation
+            ? rectpack2D::flipping_option::ENABLED
+            : rectpack2D::flipping_option::DISABLED
     );
 
     size_t atlasIdx = 0;
     while (!sprites.empty()) {
         rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
 
-        int16_t binWidth = result.w - doublePadding;
-        int16_t binHeight = result.h - doublePadding;
+        int16_t binWidth = std::ceil(result.w) - doublePadding;
+        int16_t binHeight = std::ceil(result.h) - doublePadding;
         Atlas& atlas = atlases.emplace_back(
             binWidth,
             binHeight,
@@ -348,14 +351,17 @@ void renderSprite(
     bool argb
 ) {
     const Rect& rect = sprite.rect;
+    int width = rect.w, height = rect.h;
 
     for (auto& [scale, spritesheet] : atlas.spritesheets) {
+        int16_t spriteWidth = ceil(rect.flipped ? height : width, scale);
+        int16_t spriteHeight = ceil(rect.flipped ? width : height, scale);
         spritesheet.frames[sprite.name] = {
             .frame = {
                 .x = floor(rect.x, scale),
                 .y = floor(rect.y, scale),
-                .w = ceil(rect.w, scale),
-                .h = ceil(rect.h, scale),
+                .w = spriteWidth,
+                .h = spriteHeight,
             },
             .sourceSize = {
                 .w = ceil(sprite.width, scale),
@@ -364,21 +370,31 @@ void renderSprite(
             .spriteSourceSize = {
                 .x = floor(sprite.bboxX, scale),
                 .y = floor(sprite.bboxY, scale),
-                .w = ceil(rect.w, scale),
-                .h = ceil(rect.h, scale),
+                .w = spriteWidth,
+                .h = spriteHeight,
             },
-            .rotated = false,
+            .rotated = rect.flipped,
             .trimmed = sprite.trimmed,
         };
     }
 
-    int width = rect.w, height = rect.h;
     uint32_t* spriteData = spriteBuffer.data;
     std::memset(spriteData, 0, width * height * 4);
 
+    // The actual rendering happens here.
+    // We render to a temporary sprite buffer to clip the SVG to its viewBox.
     resvg_transform transform = resvg_transform_identity();
-    transform.e = -sprite.bboxX;
-    transform.f = -sprite.bboxY;
+    if (rect.flipped) {
+        transform.a = 0;
+        transform.b = 1;
+        transform.c = -1;
+        transform.d = 0;
+        transform.e = (float) width - sprite.bboxY;
+        transform.f = -sprite.bboxX;
+    } else {
+        transform.e = -sprite.bboxX;
+        transform.f = -sprite.bboxY;
+    }
     resvg_render(
         sprite.tree,
         transform,
@@ -388,6 +404,10 @@ void renderSprite(
     );
     resvg_tree_destroy(sprite.tree);
 
+    // this pair of loops has three functions:
+    // 1. copy data from the sprite buffer to the atlas buffer
+    // 2. un-premultiply the premultiplied alpha outputted by resvg to avoid artifacts
+    // 3. convert rgba -> argb if only outputting webp to avoid a second conversion later
     // resvg outputs premultiplied alpha,
     // so we need to un-premultiply it before passing to the encoder or it'll cause artifacts.
     // also, if we're only outputting webp,
