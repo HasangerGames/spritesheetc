@@ -2,6 +2,9 @@
 
 #include <set>
 #include <string>
+#include <stdexcept>
+#include <vector>
+#include <cstdint>
 
 namespace spritesheetc {
 
@@ -13,13 +16,16 @@ enum class TextureFormat {
     Ktx2Etc1s,
     Ktx2Uastc,
     Webp,
-    Png
+    Png,
 };
 
-struct SpritesheetBuilderConfig {
-    /** List of files to add to the atlas(es). Must be in SVG format. */
-    std::vector<std::string> inputFiles;
+enum class EncoderSpeed {
+    Slow,
+    Medium,
+    Fast,
+};
 
+struct BuilderOptions {
     /** Name of the output atlases. Default "atlas". */
     std::string atlasName = "atlas";
 
@@ -59,20 +65,10 @@ struct SpritesheetBuilderConfig {
     uint16_t maxAtlasSize = 4096;
 
     /** Ensures atlas dimensions are powers of two. Default false. */
-    bool pot = false;
+    bool powerOfTwo = false;
 
-    /** Ensures atlases are square. Default false. */
+    /** Ensures atlas width and height are equal. Default false. */
     bool square = false;
-
-    /**
-     * Packing value passed to rectpack2D.
-     * 1 yields the best possible packing.
-     * Larger values are faster but yield worse packing.
-     * Negative values can theoretically yield better packing for small rectangles,
-     * but 1 should be good enough for most use cases.
-     * Default 1.
-     */
-    int packingQuality = 1;
 
     /**
      * Padding to add around each sprite, in pixels.
@@ -81,54 +77,44 @@ struct SpritesheetBuilderConfig {
      */
     uint8_t padding = 2;
 
-    /** Allows sprites to be flipped to save atlas space. Default true. */
+    /** Allows sprites to be rotated 90 degrees to save atlas space. Default true. */
     bool allowRotation = true;
 
     /** Removes transparent pixels from the edges of sprites to save atlas space. Default true. */
     bool allowTrimming = true;
 
     /**
-     * Number of threads the spritesheet builder should use.
-     * The encoder may use more threads than this if encoderMultithreading is enabled,
-     * which it is by default.
-     * Passing 0 will create as many threads as the CPU supports.
-     * Default 0.
+     * Controls the extension added to the name of each sprite.
+     * If set to an empty string (""), the extension will be removed.
+     * For example, given an input file input/foo.svg, if extension is "", the sprite will be named "foo".
+     * If extension is ".img", the sprite will be named "foo.img".
+     * Default empty string.
      */
-    uint16_t builderThreads = 0;
+    std::string extension;
+
+    /** Enables multithreading. Default true. */
+    bool multithreaded = true;
 
     /**
-     * Enables multithreading for the encoder specifically.
-     * The encoding libraries used provide no control over the number of threads,
-     * so only a boolean toggle is given here.
-     * Default true.
+     * Controls the speed of the encoder.
+     * Slow is the slowest but produces the smallest files.
+     * Medium is between Slow and Fast.
+     * Fast is the fastest but produces the largest files.
+     * Default Medium.
      */
-    bool encoderMultithreading = true;
-
-    /**
-     * Encoding quality. 0 = lowest, 100 = highest.
-     * For lossless formats, higher values increase encoding time but yield smaller file sizes.
-     * Default 100.
-     */
-    uint8_t encoderQuality = 100;
-
-    /**
-     * Encoder method, used by WebP only. Ranges from 0-6.
-     * 6 has the highest encoding time but the smallest file size.
-     * 0 has the lowest encoding time but the largest file size.
-     * Default 6.
-     */
-    uint8_t encoderMethod = 6;
-
-    /** Enables lossless compression, used by WebP only. Default true. */
-    bool encoderLossless = true;
+    EncoderSpeed speed = EncoderSpeed::Medium;
 };
 
-void buildSpritesheets(const SpritesheetBuilderConfig& config);
+/**
+ * Builds a collection of spritesheets.
+ * @param inputFiles Paths to the input files. Each must be in SVG format
+ * @param opts Options for the spritesheet builder
+ * @return Paths to the outputted images. To access the metadata, simply add ".json" to the path
+ */
+std::vector<std::string> buildSpritesheets(const std::vector<std::string>& inputFiles, const BuilderOptions& opts = {});
 
-std::vector<std::string> imagePathsFromDirectory(const std::string& path);
+std::vector<std::string> buildSpritesheetsFromDirectories(const std::vector<std::string>& inputDirectories, const BuilderOptions& opts = {});
 
-std::vector<std::string> imagePathsFromDirectories(const std::vector<std::string>& paths);
-
-std::vector<std::string> imagePathsFromFileList(const std::string& path);
+std::vector<std::string> buildSpritesheetsFromFileList(const std::string& inputFileList, const BuilderOptions& opts = {});
 
 }
