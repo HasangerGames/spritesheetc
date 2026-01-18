@@ -25,36 +25,7 @@
 
 using namespace spritesheetc;
 
-template<typename T>
-struct Buffer {
-    T* data;
-    size_t size;
-
-    Buffer() : data(nullptr), size(0) { }
-    explicit Buffer(size_t size) : data(new T[size]), size(size) { }
-    ~Buffer() { delete[] data; }
-
-    Buffer(Buffer&& other) noexcept : data(other.data), size(other.size) {
-        other.data = nullptr;
-        other.size = 0;
-    }
-
-    Buffer& operator=(Buffer&& other) noexcept {
-        if (this != &other) {
-            delete[] data;
-            data = other.data;
-            size = other.size;
-            other.data = nullptr;
-            other.size = 0;
-        }
-        return *this;
-    }
-
-    Buffer(const Buffer&) = delete;
-    Buffer& operator=(const Buffer&) = delete;
-};
-
-using Job = std::function<void(Buffer<uint32_t>&)>;
+using Job = std::function<void()>;
 
 class ThreadPool {
 public:
@@ -69,8 +40,7 @@ public:
 
     void queueJobsAndWait(std::vector<Job>& jobs) {
         if (m_threads.empty()) {
-            Buffer<uint32_t> buffer;
-            for (const Job& job : jobs) job(buffer);
+            for (const Job& job : jobs) job();
         } else {
             size_t current = m_remainingJobs = jobs.size();
             m_queue.enqueue_bulk(m_producerToken, std::make_move_iterator(jobs.begin()), jobs.size());
@@ -89,13 +59,12 @@ public:
     }
 private:
     void threadLoop() {
-        Buffer<uint32_t> buffer;
         moodycamel::ConsumerToken consumerToken(m_queue);
         while (true) {
             Job job;
             m_queue.wait_dequeue(consumerToken, job);
             if (job == nullptr) return; // null job = shutdown signal
-            job(buffer);
+            job();
             if (m_remainingJobs.fetch_sub(1, std::memory_order::acq_rel) == 1) {
                 m_remainingJobs.notify_one();
             }
@@ -168,7 +137,8 @@ struct Spritesheet {
 };
 
 struct Sprite {
-    Buffer<char> data;
+    std::unique_ptr<char[]> data;
+    size_t dataSize;
     std::string name;
     uint16_t width = 0, height = 0;
     float bboxX = 0, bboxY = 0;
@@ -181,7 +151,7 @@ struct Sprite {
 
 struct Atlas {
     uint16_t w, h;
-    Buffer<uint32_t> pixels;
+    std::unique_ptr<uint32_t[]> pixels;
     size_t id;
     std::vector<Sprite> sprites;
     std::atomic<size_t> spritesToBeRendered;
@@ -189,17 +159,16 @@ struct Atlas {
 };
 
 void loadSprite(const std::string& filePath, Sprite& sprite, XXH64_hash_t& hash) {
-    std::ifstream input{filePath, std::ios::binary};
+    FILE* input = std::fopen(filePath.c_str(), "rb");
 
-    input.seekg(0, std::ios::end);
-    std::streamsize fileSize = input.tellg();
-    input.seekg(0, std::ios::beg);
+    sprite.dataSize = std::filesystem::file_size(filePath);
 
-    sprite.data = Buffer<char>(fileSize);
-    char* spriteData = sprite.data.data;
-    input.read(spriteData, fileSize);
+    sprite.data = std::make_unique_for_overwrite<char[]>(sprite.dataSize);
+    char* spriteData = sprite.data.get();
+    std::fread(spriteData, sprite.dataSize, 1, input);
+    std::fclose(input);
 
-    hash = XXH64(spriteData, fileSize, 0) ^ XXH64(filePath.data(), filePath.size(), 0);
+    hash = XXH64(spriteData, sprite.dataSize, 0) ^ XXH64(filePath.data(), filePath.size(), 0);
 }
 
 void parseSprite(
@@ -208,7 +177,7 @@ void parseSprite(
     resvg_options* opt,
     const BuilderOptions& opts
 ) {
-    auto err = (resvg_error) resvg_parse_tree_from_data(sprite.data.data, sprite.data.size, opt, &sprite.tree);
+    auto err = (resvg_error) resvg_parse_tree_from_data(sprite.data.get(), sprite.dataSize, opt, &sprite.tree);
     if (err != RESVG_OK) {
         std::string errorMessage;
         switch (err) {
@@ -235,9 +204,10 @@ void parseSprite(
         }
         throw SpritesheetBuilderException(filePath + ": Failed to parse: " + errorMessage);
     }
+    sprite.data.release();
 
     resvg_size size = resvg_get_image_size(sprite.tree);
-    uint16_t width = std::ceil(size.width), height = std::ceil(size.height);
+    int width = std::ceil(size.width), height = std::ceil(size.height);
     if (width > opts.maxAtlasSize || height > opts.maxAtlasSize) {
         throw SpritesheetBuilderException(std::format(
             "{}: Maximum atlas size exceeded: width {}, height {}, maximum {}",
@@ -268,11 +238,13 @@ void parseSprite(
     sprite.rect = rectpack2D::rect_xywh(-1, -1, width + opts.padding, height + opts.padding); // -1 means rect hasn't been packed yet
 }
 
-int16_t floor(int val, float scale) {
+template<typename T>
+int16_t floor(T val, float scale) {
     return std::floor((float) val * scale);
 }
 
-int16_t ceil(int val, float scale) {
+template<typename T>
+int16_t ceil(T val, float scale) {
     return std::ceil((float) val * scale);
 }
 
@@ -313,7 +285,7 @@ std::deque<Atlas> packAtlases(
         Atlas& atlas = atlases.emplace_back(
             binWidth,
             binHeight,
-            Buffer<uint32_t>(binWidth * binHeight),
+            std::make_unique_for_overwrite<uint32_t[]>(binWidth * binHeight),
             ++atlasIdx
         );
 
@@ -389,14 +361,14 @@ void initUnpremulTable() {
 
 void renderSprite(
     const Sprite& sprite,
+    const std::unique_ptr<uint32_t[]>& spriteBuffer,
     Atlas& atlas,
-    const Buffer<uint32_t>& spriteBuffer,
     bool argb
 ) {
     const Rect& rect = sprite.rect;
     int width = rect.w, height = rect.h;
 
-    uint32_t* spriteData = spriteBuffer.data;
+    uint32_t* spriteData = spriteBuffer.get();
     std::memset(spriteData, 0, width * height * 4);
 
     // The actual rendering happens here
@@ -431,7 +403,7 @@ void renderSprite(
     // 2. Un-premultiply the premultiplied alpha outputted by resvg to avoid artifacts
     // 3. Convert RGBA -> ARGB if only outputting WebP to avoid a second conversion later
     uint16_t atlasWidth = atlas.w;
-    uint32_t* atlasData = atlas.pixels.data + rect.x + rect.y * atlasWidth;
+    uint32_t* atlasData = atlas.pixels.get() + rect.x + rect.y * atlasWidth;
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             uint32_t pixel = spriteData[x];
@@ -473,11 +445,11 @@ void encodeWebp(const Atlas& atlas, FILE* file, const WebPConfig& config, bool a
     picture.use_argb = 1;
 
     if (argb) {
-        picture.argb = atlas.pixels.data;
+        picture.argb = atlas.pixels.get();
         picture.argb_stride = atlas.w;
     } else if (WebPPictureImportRGBA(
         &picture,
-        reinterpret_cast<const uint8_t*>(atlas.pixels.data),
+        reinterpret_cast<const uint8_t*>(atlas.pixels.get()),
         atlas.w * 4
     ) == 0) {
         throw SpritesheetBuilderException("WebP data import failed");
@@ -486,7 +458,7 @@ void encodeWebp(const Atlas& atlas, FILE* file, const WebPConfig& config, bool a
     picture.custom_ptr = file;
     picture.writer = [](const uint8_t* data, size_t size, const WebPPicture* picture) -> int {
         auto* file = static_cast<FILE*>(picture->custom_ptr);
-        fwrite(data, size, 1, file);
+        std::fwrite(data, size, 1, file);
         return 1;
     };
 
@@ -503,7 +475,7 @@ void encodeKtx2(const Atlas& atlas, FILE* file, basist::basis_tex_format format,
     }
 
     basisu::image image;
-    image.init(reinterpret_cast<const uint8_t*>(atlas.pixels.data), atlas.w, atlas.h, 4);
+    image.init(reinterpret_cast<const uint8_t*>(atlas.pixels.get()), atlas.w, atlas.h, 4);
     basisu::vector<basisu::image> images;
     images.push_back(image);
 
@@ -522,7 +494,7 @@ void encodeKtx2(const Atlas& atlas, FILE* file, basist::basis_tex_format format,
         nullptr
     );
 
-    fwrite(data, size, 1, file);
+    std::fwrite(data, size, 1, file);
 
     basisu::basis_free_data(data);
 }
@@ -540,7 +512,7 @@ void encodePng(const Atlas& atlas, FILE* file) {
 
     spng_set_png_file(encoder, file);
 
-    int code = spng_encode_image(encoder, atlas.pixels.data, atlas.pixels.size * 4, SPNG_FMT_PNG, SPNG_ENCODE_FINALIZE);
+    int code = spng_encode_image(encoder, atlas.pixels.get(), atlas.w * atlas.h * 4, SPNG_FMT_PNG, SPNG_ENCODE_FINALIZE);
     if (code != 0) {
         throw SpritesheetBuilderException(std::format("PNG encode failed: {}", spng_strerror(code)));
     }
@@ -618,11 +590,11 @@ void encodeAtlas(
                 throw SpritesheetBuilderException(jsonPath + ": Failed to write JSON: " + glz::format_error(error));
             }
 
-            FILE* file = fopen(filePath.c_str(), "wb");
+            FILE* file = std::fopen(filePath.c_str(), "wb");
             if (file == nullptr) {
                 throw SpritesheetBuilderException("Unable to write to file: " + filePath);
             }
-            setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
+            std::setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
             switch (format) {
             case TextureFormat::Ktx2Etc1s:
                 encodeKtx2(atlas, file, basist::basis_tex_format::cETC1S, multithreading);
@@ -637,7 +609,7 @@ void encodeAtlas(
                 encodePng(atlas, file);
                 break;
             }
-            fclose(file);
+            std::fclose(file);
         }
     }
 }
@@ -666,11 +638,11 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     // Phase 1: Load sprites
     Timer load{log};
     std::vector<Sprite> sprites{numInputFiles};
-    Buffer<XXH64_hash_t> hashes{numInputFiles};
+    auto hashes = std::make_unique_for_overwrite<XXH64_hash_t[]>(numInputFiles);
 
     for (size_t i = 0; i < numInputFiles; ++i) {
-        jobs.emplace_back([&, i](Buffer<uint32_t>&) {
-            loadSprite(inputFiles[i], sprites[i], hashes.data[i]);
+        jobs.emplace_back([&, i] {
+            loadSprite(inputFiles[i], sprites[i], hashes.get()[i]);
         });
     }
     threadPool.queueJobsAndWait(jobs);
@@ -678,7 +650,7 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
     // Check cache
-    XXH64_hash_t hash = XXH64(hashes.data, hashes.size * sizeof(XXH64_hash_t), 0);
+    XXH64_hash_t hash = XXH64(hashes.get(), numInputFiles * sizeof(XXH64_hash_t), 0);
     std::set<std::pair<TextureFormat, float>> cachedFormats;
     if (opts.cache) {
         bool allExist = true;
@@ -712,7 +684,7 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
 
     jobs.clear();
     for (size_t i = 0; i < numInputFiles; ++i) {
-        jobs.emplace_back([&, i](Buffer<uint32_t>&) {
+        jobs.emplace_back([&, i] {
             parseSprite(inputFiles[i], sprites[i], opt, opts);
         });
     }
@@ -732,15 +704,16 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     bool argb = opts.formats.size() == 1 && opts.formats.contains(TextureFormat::Webp);
     bool multithreading = opts.multithreaded && atlases.size() < numThreads;
     initUnpremulTable();
+    thread_local std::unique_ptr<uint32_t[]> spriteBuffer = nullptr;
 
     jobs.clear();
     for (Atlas& atlas : atlases) {
         for (const Sprite& sprite : atlas.sprites) {
-            jobs.emplace_back([&](Buffer<uint32_t>& spriteBuffer) {
-                if (spriteBuffer.size == 0) {
-                    spriteBuffer = Buffer<uint32_t>(spriteMaxW * spriteMaxH);
+            jobs.emplace_back([&] {
+                if (spriteBuffer == nullptr) {
+                    spriteBuffer = std::make_unique_for_overwrite<uint32_t[]>(spriteMaxW * spriteMaxH);
                 }
-                renderSprite(sprite, atlas, spriteBuffer, argb);
+                renderSprite(sprite, spriteBuffer, atlas, argb);
 
                 if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
                     encodeAtlas(atlas, outputFiles, cachedFormats, opts, hash, argb, multithreading);
