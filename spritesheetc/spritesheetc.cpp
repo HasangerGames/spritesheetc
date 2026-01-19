@@ -138,7 +138,7 @@ struct Spritesheet {
 
 struct Sprite {
     std::unique_ptr<char[]> data;
-    size_t dataSize;
+    size_t dataSize = 0;
     std::string name;
     uint16_t width = 0, height = 0;
     float bboxX = 0, bboxY = 0;
@@ -273,8 +273,8 @@ std::deque<Atlas> packAtlases(
     while (!sprites.empty()) {
         rectpack2D::rect_wh result = rectpack2D::find_best_packing<SpacesType>(sprites, finderInput);
 
-        uint16_t binWidth = std::ceil(result.w) - opts.padding;
-        uint16_t binHeight = std::ceil(result.h) - opts.padding;
+        uint16_t binWidth = (uint16_t) std::ceil(result.w) - opts.padding;
+        uint16_t binHeight = (uint16_t) std::ceil(result.h) - opts.padding;
         if (opts.square) {
             binWidth = binHeight = std::max(binWidth, binHeight);
         }
@@ -520,33 +520,36 @@ void encodePng(const Atlas& atlas, FILE* file) {
     spng_ctx_free(encoder);
 }
 
-std::string extensionFromTextureFormat(TextureFormat format) {
-    switch (format) {
-    case TextureFormat::Ktx2Etc1s:
-    case TextureFormat::Ktx2Uastc:
-        return "ktx2";
-    case TextureFormat::Webp:
-        return "webp";
-    case TextureFormat::Png:
-        return "png";
-    default:
-        throw SpritesheetBuilderException("No known extension for texture format");
+template<class Fn>
+void iterateTextureFormats(const BuilderOptions& opts, XXH64_hash_t hash, Fn&& callback) {
+    for (TextureFormat format : opts.formats) {
+        std::string extension;
+        switch (format) {
+        case TextureFormat::Ktx2Etc1s:
+        case TextureFormat::Ktx2Uastc:
+            extension = "ktx2";
+            break;
+        case TextureFormat::Webp:
+            extension = "webp";
+            break;
+        case TextureFormat::Png:
+            extension = "png";
+            break;
+        }
+        for (float scale : opts.resolutions) {
+            std::string basePath = std::filesystem::path(opts.outputDirectory) / std::format(
+                "{}@{}x-{:x}",
+                opts.atlasName,
+                scale,
+                hash
+            );
+            callback(format, scale, basePath, extension);
+        }
     }
-}
-
-std::string getBasePath(const BuilderOptions& opts, float scale, XXH64_hash_t hash) {
-    return std::format(
-        "{}/{}@{}x-{:x}",
-        opts.outputDirectory,
-        opts.atlasName,
-        scale,
-        hash
-    );
 }
 
 void encodeAtlas(
     Atlas& atlas,
-    std::vector<std::string>& outputFiles,
     const std::set<std::pair<TextureFormat, float>>& cachedFormats,
     const BuilderOptions& opts,
     XXH64_hash_t hash,
@@ -574,44 +577,39 @@ void encodeAtlas(
         }
     }
 
-    for (TextureFormat format : opts.formats) {
-        std::string extension = extensionFromTextureFormat(format);
-        for (float scale : opts.resolutions) {
-            if (cachedFormats.contains({format, scale})) continue;
+    iterateTextureFormats(opts, hash, [&](TextureFormat format, float scale, const std::string& basePath, const std::string& extension) {
+        if (cachedFormats.contains({format, scale})) return;
 
-            std::string basePath = getBasePath(opts, scale, hash);
-            std::string filePath = std::format("{}-{}.{}", basePath, atlas.id, extension);
-            outputFiles.emplace_back(filePath);
+        std::string filePath = std::format("{}-{}.{}", basePath, atlas.id, extension);
 
-            Spritesheet& spritesheet = atlas.spritesheets[scale];
-            spritesheet.meta.image = filePath;
-            std::string jsonPath = filePath + ".json";
-            if (glz::error_ctx error = glz::write_file_json(spritesheet, jsonPath, std::string{})) {
-                throw SpritesheetBuilderException(jsonPath + ": Failed to write JSON: " + glz::format_error(error));
-            }
-
-            FILE* file = std::fopen(filePath.c_str(), "wb");
-            if (file == nullptr) {
-                throw SpritesheetBuilderException("Unable to write to file: " + filePath);
-            }
-            std::setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
-            switch (format) {
-            case TextureFormat::Ktx2Etc1s:
-                encodeKtx2(atlas, file, basist::basis_tex_format::cETC1S, multithreading);
-                break;
-            case TextureFormat::Ktx2Uastc:
-                encodeKtx2(atlas, file, basist::basis_tex_format::cUASTC4x4, multithreading);
-                break;
-            case TextureFormat::Webp:
-                encodeWebp(atlas, file, webpConfig, argb);
-                break;
-            case TextureFormat::Png:
-                encodePng(atlas, file);
-                break;
-            }
-            std::fclose(file);
+        Spritesheet& spritesheet = atlas.spritesheets[scale];
+        spritesheet.meta.image = filePath;
+        std::string jsonPath = filePath + ".json";
+        if (glz::error_ctx error = glz::write_file_json(spritesheet, jsonPath, std::string{})) {
+            throw SpritesheetBuilderException(jsonPath + ": Failed to write JSON: " + glz::format_error(error));
         }
-    }
+
+        FILE* file = std::fopen(filePath.c_str(), "wb");
+        if (file == nullptr) {
+            throw SpritesheetBuilderException("Unable to write to file: " + filePath);
+        }
+        std::setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
+        switch (format) {
+        case TextureFormat::Ktx2Etc1s:
+            encodeKtx2(atlas, file, basist::basis_tex_format::cETC1S, multithreading);
+            break;
+        case TextureFormat::Ktx2Uastc:
+            encodeKtx2(atlas, file, basist::basis_tex_format::cUASTC4x4, multithreading);
+            break;
+        case TextureFormat::Webp:
+            encodeWebp(atlas, file, webpConfig, argb);
+            break;
+        case TextureFormat::Png:
+            encodePng(atlas, file);
+            break;
+        }
+        std::fclose(file);
+    });
 }
 
 namespace spritesheetc {
@@ -635,62 +633,76 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
 
     std::vector<std::string> outputFiles;
 
-    // Phase 1: Load sprites
+    // Phase 1: Load sprites, create a hash from all SVG files and paths
     Timer load{log};
     std::vector<Sprite> sprites{numInputFiles};
     auto hashes = std::make_unique_for_overwrite<XXH64_hash_t[]>(numInputFiles);
-
     for (size_t i = 0; i < numInputFiles; ++i) {
         jobs.emplace_back([&, i] {
             loadSprite(inputFiles[i], sprites[i], hashes.get()[i]);
         });
     }
     threadPool.queueJobsAndWait(jobs);
-
+    XXH64_hash_t hash = XXH64(hashes.get(), numInputFiles * sizeof(XXH64_hash_t), 0);
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
-    // Check cache
-    XXH64_hash_t hash = XXH64(hashes.get(), numInputFiles * sizeof(XXH64_hash_t), 0);
+    // Check cache, exit if atlases already exist with current hash
     std::set<std::pair<TextureFormat, float>> cachedFormats;
     if (opts.cache) {
         bool allExist = true;
-        for (TextureFormat format : opts.formats) {
-            std::string extension = extensionFromTextureFormat(format);
-            for (float scale : opts.resolutions) {
-                std::string basePath = getBasePath(opts, scale, hash);
-                std::ifstream cacheFile{std::format("{}.{}.cache", basePath, extension)};
-                if (!cacheFile.good()) {
-                    allExist = false;
-                    continue;
-                }
-
-                size_t numFiles;
-                cacheFile >> numFiles;
-                for (size_t i = 1; i <= numFiles; ++i) {
-                    outputFiles.emplace_back(std::format("{}-{}.{}", basePath, i, extension));
-                }
-                cachedFormats.emplace(format, scale);
+        iterateTextureFormats(opts, hash, [&](TextureFormat format, float scale, const std::string& basePath, const std::string& extension) {
+            std::ifstream cacheFile{std::format("{}.{}.cache", basePath, extension)};
+            if (!cacheFile.good()) {
+                allExist = false;
+                return;
             }
-        }
+
+            std::string file;
+            while (std::getline(cacheFile, file)) {
+                outputFiles.emplace_back(file);
+            }
+            cachedFormats.emplace(format, scale);
+        });
         if (allExist) {
             if (opts.logStatus) std::cout << "[spritesheetc] Cache hit! Nothing to do, exiting.\n";
             return outputFiles;
         }
     }
 
+    // Remove old atlases from the output directory if it exceeds the maximum size
+    size_t outputDirSize = 0;
+    std::map<std::filesystem::file_time_type, std::filesystem::directory_entry> files;
+    std::string hashStr = std::format("{:x}", hash);
+    for (const std::filesystem::directory_entry& path : std::filesystem::directory_iterator(opts.outputDirectory)) {
+        std::string filename = path.path().filename();
+        if (filename.contains(hashStr)) continue; // skip files with current hash
+        outputDirSize += path.file_size();
+        if (!filename.ends_with(".cache")) continue;
+        files.emplace(path.last_write_time(), path);
+    }
+    if (outputDirSize > opts.maxOutputDirSize) {
+        for (const std::filesystem::directory_entry& cacheEntry : files | std::views::values) {
+            std::ifstream cacheFile{cacheEntry.path()};
+            std::string file;
+            while (std::getline(cacheFile, file)) {
+                std::filesystem::remove(file);
+                std::filesystem::remove(file + ".json");
+            }
+            std::filesystem::remove(cacheEntry);
+        }
+    }
+
     // Phase 2: Parse sprites
     Timer parse{log};
-    resvg_options* opt = resvg_options_create();
-
+    resvg_options* resvgOpts = resvg_options_create();
     jobs.clear();
     for (size_t i = 0; i < numInputFiles; ++i) {
         jobs.emplace_back([&, i] {
-            parseSprite(inputFiles[i], sprites[i], opt, opts);
+            parseSprite(inputFiles[i], sprites[i], resvgOpts, opts);
         });
     }
     threadPool.queueJobsAndWait(jobs);
-
-    resvg_options_destroy(opt);
+    resvg_options_destroy(resvgOpts);
     parse.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles));
 
     // Phase 3: Pack sprites into atlases
@@ -702,43 +714,37 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     // Phase 4: Render sprites to atlases + encode atlases
     Timer render{log};
     bool argb = opts.formats.size() == 1 && opts.formats.contains(TextureFormat::Webp);
-    bool multithreading = opts.multithreaded && atlases.size() < numThreads;
+    bool encoderMultithreaded = opts.multithreaded
+        && atlases.size() * opts.formats.size() * opts.resolutions.size() < numThreads;
     initUnpremulTable();
-    thread_local std::unique_ptr<uint32_t[]> spriteBuffer = nullptr;
-
     jobs.clear();
     for (Atlas& atlas : atlases) {
         for (const Sprite& sprite : atlas.sprites) {
             jobs.emplace_back([&] {
-                if (spriteBuffer == nullptr) {
-                    spriteBuffer = std::make_unique_for_overwrite<uint32_t[]>(spriteMaxW * spriteMaxH);
-                }
+                thread_local auto spriteBuffer = std::make_unique_for_overwrite<uint32_t[]>(spriteMaxW * spriteMaxH);
                 renderSprite(sprite, spriteBuffer, atlas, argb);
 
                 if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
-                    encodeAtlas(atlas, outputFiles, cachedFormats, opts, hash, argb, multithreading);
+                    encodeAtlas(atlas, cachedFormats, opts, hash, argb, encoderMultithreaded);
                 }
             });
         }
     }
     threadPool.queueJobsAndWait(jobs);
-
-    // Create files signaling that cache exists
-    if (opts.cache) {
-        for (TextureFormat format : opts.formats) {
-            std::string extension = extensionFromTextureFormat(format);
-            for (float scale : opts.resolutions) {
-                std::string basePath = getBasePath(opts, scale, hash);
-                std::ofstream cacheFile{std::format("{}.{}.cache", basePath, extension)};
-                cacheFile << atlases.size();
-            }
-        }
-    }
-
     render.stop(std::format("[spritesheetc] {} atlases written", atlases.size()));
 
-    total.stop("[spritesheetc] Done. Total time");
+    // Populate outputFiles and create cache file,
+    // which is done even if cache is false, because the cache file is also used when deleting old files
+    iterateTextureFormats(opts, hash, [&](TextureFormat, float, const std::string& basePath, const std::string& extension) {
+        std::ofstream cacheFile{std::format("{}.{}.cache", basePath, extension)};
+        for (size_t i = 1; i <= atlases.size(); ++i) {
+            std::string imagePath = std::format("{}-{}.{}", basePath, i, extension);
+            outputFiles.emplace_back(imagePath);
+            cacheFile << imagePath << "\n";
+        }
+    });
 
+    total.stop("[spritesheetc] Done. Total time");
     return outputFiles;
 }
 

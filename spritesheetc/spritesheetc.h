@@ -43,10 +43,11 @@ struct BuilderOptions {
 
     /**
      * Maximum size of the output directory, in bytes.
-     * If the output directory exceeds this size, the oldest atlases will be deleted automatically.
-     * Default 500'000 (500 MB).
+     * If the total size of the atlases in the output directory exceeds this size,
+     * older atlases will be deleted automatically.
+     * Default 500'000'000 (500 MB).
      */
-    size_t maxOutputDirSize = 500'000;
+    size_t maxOutputDirSize = 500'000'000;
 
     /** Logs the status of the spritesheet builder as it builds. Default true. */
     bool logStatus = true;
