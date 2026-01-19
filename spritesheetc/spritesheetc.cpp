@@ -1,16 +1,6 @@
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <cstring>
-#include <filesystem>
-#include <format>
-#include <fstream>
-#include <thread>
-#include <unordered_map>
-#include <latch>
+#include <atomic>
 #include <iostream>
-#include <memory_resource>
-#include <queue>
+#include <thread>
 
 #include "basisu_comp.h"
 #include "resvg.h"
@@ -25,8 +15,6 @@
 
 using namespace spritesheetc;
 
-using Job = std::function<void()>;
-
 class ThreadPool {
 public:
     explicit ThreadPool(uint16_t numThreads) {
@@ -38,16 +26,26 @@ public:
     }
     ~ThreadPool() { shutdown(); }
 
-    void queueJobsAndWait(std::vector<Job>& jobs) {
+    void reset(size_t numJobs) {
+        if (m_threads.empty()) return;
+        m_remainingJobs.store(numJobs, std::memory_order_relaxed);
+    }
+
+    void queueJob(std::move_only_function<void()> job) {
         if (m_threads.empty()) {
-            for (const Job& job : jobs) job();
+            job();
         } else {
-            size_t current = m_remainingJobs = jobs.size();
-            m_queue.enqueue_bulk(m_producerToken, std::make_move_iterator(jobs.begin()), jobs.size());
-            while (current > 0) {
-                m_remainingJobs.wait(current, std::memory_order_acquire);
-                current = m_remainingJobs.load(std::memory_order_acquire);
-            }
+            thread_local moodycamel::ProducerToken token{m_queue};
+            m_queue.enqueue(token, std::move(job));
+        }
+    }
+
+    void waitForJobs() const {
+        if (m_threads.empty()) return;
+        size_t current = m_remainingJobs;
+        while (current > 0) {
+            m_remainingJobs.wait(current, std::memory_order_acquire);
+            current = m_remainingJobs.load(std::memory_order_acquire);
         }
     }
 
@@ -59,20 +57,18 @@ public:
     }
 private:
     void threadLoop() {
-        moodycamel::ConsumerToken consumerToken(m_queue);
         while (true) {
-            Job job;
-            m_queue.wait_dequeue(consumerToken, job);
+            std::move_only_function<void()> job;
+            thread_local moodycamel::ConsumerToken token{m_queue};
+            m_queue.wait_dequeue(token, job);
             if (job == nullptr) return; // null job = shutdown signal
             job();
-            if (m_remainingJobs.fetch_sub(1, std::memory_order::acq_rel) == 1) {
+            if (m_remainingJobs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                 m_remainingJobs.notify_one();
             }
         }
     }
-
-    moodycamel::BlockingConcurrentQueue<Job> m_queue;
-    moodycamel::ProducerToken m_producerToken{m_queue};
+    moodycamel::BlockingConcurrentQueue<std::move_only_function<void()>> m_queue;
     std::atomic<size_t> m_remainingJobs;
     std::vector<std::jthread> m_threads;
 };
@@ -80,19 +76,11 @@ private:
 class Timer {
 public:
     explicit Timer(bool enable = true) : m_disabled(!enable) {
-        if (m_disabled) return;
-        m_start = std::chrono::steady_clock::now();
+        if (!m_disabled) m_start = std::chrono::steady_clock::now();
     }
 
     void stop(const std::string& label, double threshold = 0) {
         if (m_disabled) return;
-
-        if (m_stopped) {
-            std::cout << label << ": Already stopped\n";
-            return;
-        }
-        m_stopped = true;
-
         auto elapsed = std::chrono::steady_clock::now() - m_start;
         auto ms = std::chrono::duration<double, std::milli>(elapsed).count();
         if (ms < threshold) return;
@@ -100,7 +88,6 @@ public:
     }
 private:
     std::chrono::steady_clock::time_point m_start;
-    bool m_stopped = false;
     bool m_disabled;
 };
 
@@ -435,7 +422,26 @@ void renderSprite(
     }
 }
 
-void encodeWebp(const Atlas& atlas, FILE* file, const WebPConfig& config, bool argb) {
+void encodeWebp(const Atlas& atlas, FILE* file, const BuilderOptions& opts, bool argb) {
+    WebPConfig config;
+    WebPConfigInit(&config);
+    config.lossless = true;
+    config.thread_level = opts.multithreaded;
+    switch (opts.speed) {
+    case EncoderSpeed::Slow:
+        config.method = 6;
+        config.quality = 100;
+        break;
+    case EncoderSpeed::Medium:
+        config.method = 3;
+        config.quality = 75;
+        break;
+    case EncoderSpeed::Fast:
+        config.method = 0;
+        config.quality = 0;
+        break;
+    }
+
     WebPPicture picture;
     if (WebPPictureInit(&picture) == 0) {
         throw SpritesheetBuilderException("WebP picture init failed");
@@ -550,33 +556,13 @@ void iterateTextureFormats(const BuilderOptions& opts, XXH64_hash_t hash, Fn&& c
 
 void encodeAtlas(
     Atlas& atlas,
+    ThreadPool& threadPool,
     const std::set<std::pair<TextureFormat, float>>& cachedFormats,
     const BuilderOptions& opts,
     XXH64_hash_t hash,
     bool argb,
     bool multithreading
 ) {
-    WebPConfig webpConfig;
-    if (opts.formats.contains(TextureFormat::Webp)) {
-        WebPConfigInit(&webpConfig);
-        webpConfig.lossless = true;
-        webpConfig.thread_level = opts.multithreaded;
-        switch (opts.speed) {
-        case EncoderSpeed::Slow:
-            webpConfig.method = 6;
-            webpConfig.quality = 100;
-            break;
-        case EncoderSpeed::Medium:
-            webpConfig.method = 3;
-            webpConfig.quality = 75;
-            break;
-        case EncoderSpeed::Fast:
-            webpConfig.method = 0;
-            webpConfig.quality = 0;
-            break;
-        }
-    }
-
     iterateTextureFormats(opts, hash, [&](TextureFormat format, float scale, const std::string& basePath, const std::string& extension) {
         if (cachedFormats.contains({format, scale})) return;
 
@@ -589,26 +575,28 @@ void encodeAtlas(
             throw SpritesheetBuilderException(jsonPath + ": Failed to write JSON: " + glz::format_error(error));
         }
 
-        FILE* file = std::fopen(filePath.c_str(), "wb");
-        if (file == nullptr) {
-            throw SpritesheetBuilderException("Unable to write to file: " + filePath);
-        }
-        std::setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
-        switch (format) {
-        case TextureFormat::Ktx2Etc1s:
-            encodeKtx2(atlas, file, basist::basis_tex_format::cETC1S, multithreading);
-            break;
-        case TextureFormat::Ktx2Uastc:
-            encodeKtx2(atlas, file, basist::basis_tex_format::cUASTC4x4, multithreading);
-            break;
-        case TextureFormat::Webp:
-            encodeWebp(atlas, file, webpConfig, argb);
-            break;
-        case TextureFormat::Png:
-            encodePng(atlas, file);
-            break;
-        }
-        std::fclose(file);
+        threadPool.queueJob([&atlas, &opts, format, scale, filePath, argb, multithreading] {
+            FILE* file = std::fopen(filePath.c_str(), "wb");
+            if (file == nullptr) {
+                throw SpritesheetBuilderException("Unable to write to file: " + filePath);
+            }
+            std::setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
+            switch (format) {
+            case TextureFormat::Ktx2Etc1s:
+                encodeKtx2(atlas, file, basist::basis_tex_format::cETC1S, multithreading);
+                break;
+            case TextureFormat::Ktx2Uastc:
+                encodeKtx2(atlas, file, basist::basis_tex_format::cUASTC4x4, multithreading);
+                break;
+            case TextureFormat::Webp:
+                encodeWebp(atlas, file, opts, argb);
+                break;
+            case TextureFormat::Png:
+                encodePng(atlas, file);
+                break;
+            }
+            std::fclose(file);
+        });
     });
 }
 
@@ -623,26 +611,25 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     }
 
     // Create the thread pool
-    size_t numInputFiles = inputFiles.size();
     uint16_t numThreads = opts.multithreaded
         ? std::max(1u, std::thread::hardware_concurrency())
         : 1;
     ThreadPool threadPool{numThreads};
-    std::vector<Job> jobs;
-    jobs.reserve(numInputFiles);
 
     std::vector<std::string> outputFiles;
 
     // Phase 1: Load sprites, create a hash from all SVG files and paths
     Timer load{log};
+    size_t numInputFiles = inputFiles.size();
     std::vector<Sprite> sprites{numInputFiles};
     auto hashes = std::make_unique_for_overwrite<XXH64_hash_t[]>(numInputFiles);
+    threadPool.reset(numInputFiles);
     for (size_t i = 0; i < numInputFiles; ++i) {
-        jobs.emplace_back([&, i] {
+        threadPool.queueJob([&, i] {
             loadSprite(inputFiles[i], sprites[i], hashes.get()[i]);
         });
     }
-    threadPool.queueJobsAndWait(jobs);
+    threadPool.waitForJobs();
     XXH64_hash_t hash = XXH64(hashes.get(), numInputFiles * sizeof(XXH64_hash_t), 0);
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
@@ -695,13 +682,13 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     // Phase 2: Parse sprites
     Timer parse{log};
     resvg_options* resvgOpts = resvg_options_create();
-    jobs.clear();
+    threadPool.reset(numInputFiles);
     for (size_t i = 0; i < numInputFiles; ++i) {
-        jobs.emplace_back([&, i] {
+        threadPool.queueJob([&, i] {
             parseSprite(inputFiles[i], sprites[i], resvgOpts, opts);
         });
     }
-    threadPool.queueJobsAndWait(jobs);
+    threadPool.waitForJobs();
     resvg_options_destroy(resvgOpts);
     parse.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles));
 
@@ -714,23 +701,32 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     // Phase 4: Render sprites to atlases + encode atlases
     Timer render{log};
     bool argb = opts.formats.size() == 1 && opts.formats.contains(TextureFormat::Webp);
-    bool encoderMultithreaded = opts.multithreaded
-        && atlases.size() * opts.formats.size() * opts.resolutions.size() < numThreads;
+    size_t numEncodeJobs = atlases.size() * opts.formats.size() * opts.resolutions.size();
+    bool encoderMultithreaded = opts.multithreaded && numEncodeJobs < numThreads;
     initUnpremulTable();
-    jobs.clear();
+    threadPool.reset(numInputFiles + numEncodeJobs);
     for (Atlas& atlas : atlases) {
         for (const Sprite& sprite : atlas.sprites) {
-            jobs.emplace_back([&] {
+            threadPool.queueJob([&] {
                 thread_local auto spriteBuffer = std::make_unique_for_overwrite<uint32_t[]>(spriteMaxW * spriteMaxH);
                 renderSprite(sprite, spriteBuffer, atlas, argb);
 
-                if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order::acq_rel) == 1) {
-                    encodeAtlas(atlas, cachedFormats, opts, hash, argb, encoderMultithreaded);
-                }
+                // Once all an atlas's sprites have been rendered, we move on to encoding
+                if (atlas.spritesToBeRendered.fetch_sub(1, std::memory_order_acq_rel) > 1) return;
+
+                encodeAtlas(
+                    atlas,
+                    threadPool,
+                    cachedFormats,
+                    opts,
+                    hash,
+                    argb,
+                    encoderMultithreaded
+                );
             });
         }
     }
-    threadPool.queueJobsAndWait(jobs);
+    threadPool.waitForJobs();
     render.stop(std::format("[spritesheetc] {} atlases written", atlases.size()));
 
     // Populate outputFiles and create cache file,
