@@ -13,15 +13,20 @@ struct SpritesheetBuilderException final : std::runtime_error {
 };
 
 enum class TextureFormat {
-    Ktx2Etc1s,
-    Ktx2Uastc,
+    /** KTX2 UASTC supercompressed with Zstandard. */
+    Ktx2,
+    /** Lossless WebP. */
     Webp,
+    /** Standard PNG. */
     Png,
 };
 
 enum class EncoderSpeed {
+    /** Slowest, but produces the smallest files. */
     Slow,
+    /** In between Slow and Fast. */
     Medium,
+    /** Fastest, but produces the largest files. */
     Fast,
 };
 
@@ -52,7 +57,13 @@ struct BuilderOptions {
     /** Logs the status of the spritesheet builder as it builds. Default true. */
     bool logStatus = true;
 
-    /** List of formats to output the generated atlases in. Default Webp. */
+    /**
+     * List of formats to output the generated atlases in.
+     * Ktx2 is KTX2 UASTC supercompressed with Zstandard.
+     * Webp is lossless WebP.
+     * Png is standard PNG.
+     * Default Webp.
+     */
     std::set<TextureFormat> formats = {TextureFormat::Webp};
 
     /**
@@ -62,7 +73,7 @@ struct BuilderOptions {
      */
     std::set<float> resolutions = {1.0f};
 
-    /** Maximum allowed size of each atlas texture. Default 4096. */
+    /** Maximum allowed size of each atlas texture. Cannot be greater than 16384. Default 4096. */
     uint16_t maxAtlasSize = 4096;
 
     /** Ensures atlas dimensions are powers of two. Default false. */
@@ -70,6 +81,9 @@ struct BuilderOptions {
 
     /** Ensures atlas width and height are equal. Default false. */
     bool square = false;
+
+    /** Forces all atlases to maxAtlasSize. Default false. */
+    bool fixedSize = false;
 
     /**
      * Padding to add around each sprite, in pixels.
@@ -110,7 +124,7 @@ struct BuilderOptions {
  * Builds a collection of spritesheets.
  * @param inputFiles Paths to the input files. Each must be in SVG format
  * @param opts Options for the spritesheet builder
- * @return Paths to the outputted images. To access the metadata, simply add ".json" to the path
+ * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
  */
 std::vector<std::string> buildSpritesheets(const std::vector<std::string>& inputFiles, const BuilderOptions& opts = {});
 
