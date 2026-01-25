@@ -163,13 +163,15 @@ void loadSprite(const std::string& filePath, Sprite& sprite, XXH64_hash_t& hash)
     hash = XXH3_64bits(spriteData, sprite.dataSize) ^ XXH3_64bits(filePath.data(), filePath.size());
 }
 
+std::mutex g_out;
+
 void parseSprite(
     const std::string& filePath,
     Sprite& sprite,
     resvg_options* opt,
     const BuilderOptions& opts
 ) {
-    auto err = (resvg_error) resvg_parse_tree_from_data(sprite.data.get(), sprite.dataSize, opt, &sprite.tree);
+    auto err = static_cast<resvg_error>(resvg_parse_tree_from_data(sprite.data.get(), sprite.dataSize, opt, &sprite.tree));
     if (err != RESVG_OK) {
         std::string errorMessage;
         switch (err) {
@@ -214,16 +216,22 @@ void parseSprite(
     if (opts.allowTrimming) {
         resvg_rect bbox;
         resvg_get_image_bbox(sprite.tree, &bbox);
-        float bx = std::floor(bbox.x);
-        float by = std::floor(bbox.y);
-        float bWidth = std::min((float) width, std::ceil(bbox.width));
-        float bHeight = std::min((float) height, std::ceil(bbox.height));
-        if (bx > 0 || by > 0 || bWidth < (float) width || bHeight < (float) height) {
+        float bWidth  = std::ceil(bbox.width - std::min(bbox.x, 0.0f));  // actual width of the SVG
+        float bHeight = std::ceil(bbox.height - std::min(bbox.y, 0.0f)); // actual height of the SVG
+        auto vWidth   = static_cast<float>(width);                       // width of the viewBox
+        auto vHeight  = static_cast<float>(height);                      // height of the viewBox
+        // If the actual size of the SVG is smaller than the viewBox, we can trim it to save atlas space
+        if (
+            std::floor(bbox.x) > 0
+            || std::floor(bbox.y) > 0
+            || bWidth < vWidth
+            || bHeight < vHeight
+        ) {
             sprite.trimmed = true;
             sprite.bboxX = bbox.x;
             sprite.bboxY = bbox.y;
-            width = (uint16_t) bWidth;
-            height = (uint16_t) bHeight;
+            width = static_cast<uint16_t>(std::min(bWidth, vWidth));
+            height = static_cast<uint16_t>(std::min(bHeight, vHeight));
         }
     }
 
@@ -232,12 +240,12 @@ void parseSprite(
 
 template<typename T>
 int16_t floor(T val, float scale) {
-    return std::floor((float) val * scale);
+    return std::floor(static_cast<float>(val) * scale);
 }
 
 template<typename T>
-T ceil(T val, float scale) {
-    return std::ceil((float) val * scale);
+uint16_t ceil(T val, float scale) {
+    return std::ceil(static_cast<float>(val) * scale);
 }
 
 std::deque<Atlas> packAtlases(
@@ -269,8 +277,8 @@ std::deque<Atlas> packAtlases(
         if (opts.fixedSize) {
             binWidth = binHeight = opts.maxAtlasSize;
         } else {
-            binWidth = (uint16_t) std::ceil(result.w) - opts.padding;
-            binHeight = (uint16_t) std::ceil(result.h) - opts.padding;
+            binWidth = static_cast<uint16_t>(std::ceil(result.w)) - opts.padding;
+            binHeight = static_cast<uint16_t>(std::ceil(result.h)) - opts.padding;
             if (opts.square) {
                 binWidth = binHeight = std::max(binWidth, binHeight);
             }
@@ -377,7 +385,7 @@ void renderSprite(
         transform = {
             0, scale,
             -scale, 0,
-            (float) width + sprite.bboxY * scale,
+            static_cast<float>(width) + sprite.bboxY * scale,
             -sprite.bboxX * scale,
         };
     } else {
