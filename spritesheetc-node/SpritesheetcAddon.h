@@ -2,7 +2,7 @@
 
 class SpritesheetcAddon : public Napi::Addon<SpritesheetcAddon> {
 public:
-    SpritesheetcAddon(Napi::Env env, Napi::Object exports) {
+    SpritesheetcAddon(Napi::Env, Napi::Object exports) {
         DefineAddon(exports, {
             InstanceMethod("buildSpritesheets", &SpritesheetcAddon::buildSpritesheets),
             InstanceMethod("buildSpritesheetsFromDirectories", &SpritesheetcAddon::buildSpritesheetsFromDirectories),

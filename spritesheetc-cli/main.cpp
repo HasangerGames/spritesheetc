@@ -1,3 +1,5 @@
+#include <iostream>
+
 #include "spritesheetc.h"
 
 using namespace spritesheetc;
@@ -9,12 +11,16 @@ int main(int argc, char* argv[]) {
     //
     //     }
     // }
-    buildSpritesheetsFromDirectories({
-        "../../../Suroi/client/public/img/game/shared",
-        "../../../Suroi/client/public/img/game/normal"
+    std::vector<std::string> outputFiles = buildSpritesheetsFromDirectories({
+        "../../../../Suroi/client/public/img/game/shared",
+        "../../../../Suroi/client/public/img/game/normal"
     }, {
-        .formats = {TextureFormat::Ktx2Uastc, TextureFormat::Webp},
+        .cache = false,
+        .maxOutputDirSize = 30'000'000,
+        .formats = {TextureFormat::Webp},
+        .resolutions = {1.0f},
         .speed = EncoderSpeed::Fast,
     });
+    for (const std::string& file : outputFiles) std::cout << file << "\n";
     return 0;
 }

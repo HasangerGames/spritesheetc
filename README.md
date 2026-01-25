@@ -21,11 +21,9 @@ These instructions are intended for Linux. `spritesheetc` has not yet been teste
 
 ```shell
 git clone --recurse-submodules --shallow-submodules https://github.com/HasangerGames/spritesheetc.git
-cd spritesheetc/vendored/resvg/crates/c-api
-cargo build --release
-cd ../../../..
+cd spritesheetc
 mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake -DCMAKE_BUILD_TYPE=Release -G Ninja ..
 cmake --build .
 ```
 

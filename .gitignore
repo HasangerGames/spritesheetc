@@ -1,5 +1,8 @@
 .idea
-cmake-build-debug
-cmake-build-release
+.cache
+
 build
+
+prebuilds
+
 node_modules

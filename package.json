@@ -1,22 +1,31 @@
 {
   "name": "spritesheetc",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Ridiculously fast spritesheet generator written in C++.",
+  "main": "spritesheetc-node/index.js",
   "scripts": {
-    "install": "cmake-js compile"
+    "install": "pkg-prebuilds-verify spritesheetc-node/binding-options.js || cmake-js compile",
+    "copyPrebuilds": "pkg-prebuilds-copy --baseDir build/Release --source spritesheetc.node --name=spritesheetc --strip --napi_version=8"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
+  "keywords": [
+    "c++",
+    "spritesheet",
+    "texturepacker",
+    "svg",
+    "resvg"
+  ],
+  "author": "Henry Sanger",
+  "license": "GPL-3.0-or-later",
   "packageManager": "pnpm@10.11.0",
   "binary": {
-    "napi_versions": [8]
+    "napi_versions": [
+      8
+    ]
   },
-  "devDependencies": {
+  "dependencies": {
     "@types/node": "^25.0.9",
     "cmake-js": "^7.4.0",
     "node-addon-api": "^8.5.0",
-    "prebuild": "^13.0.1"
+    "pkg-prebuilds": "^1.0.0"
   }
 }

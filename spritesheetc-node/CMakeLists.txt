@@ -1,11 +1,15 @@
 add_compile_definitions(NAPI_VERSION=8)
 
 add_library(spritesheetc-node SHARED
-        SpritesheetcAddon.cpp
-        ${CMAKE_JS_SRC}
+    SpritesheetcAddon.cpp
+    ${CMAKE_JS_SRC}
 )
 
-set_target_properties(spritesheetc-node PROPERTIES PREFIX "" SUFFIX ".node")
+set_target_properties(spritesheetc-node PROPERTIES
+    OUTPUT_NAME spritesheetc
+    PREFIX ""
+    SUFFIX ".node"
+)
 
 if(NOT DEFINED CMAKE_JS_INC) # lets regular CMake see the headers, useful for debugging in an IDE
     set(CMAKE_JS_INC ../node_modules/node-addon-api)
