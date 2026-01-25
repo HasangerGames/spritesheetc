@@ -155,7 +155,7 @@ void loadSprite(const std::string& filePath, Sprite& sprite, XXH64_hash_t& hash)
     std::ignore = std::fread(spriteData, sprite.dataSize, 1, input);
     std::fclose(input);
 
-    hash = XXH64(spriteData, sprite.dataSize, 0) ^ XXH64(filePath.data(), filePath.size(), 0);
+    hash = XXH3_64bits(spriteData, sprite.dataSize) ^ XXH3_64bits(filePath.data(), filePath.size());
 }
 
 void parseSprite(
@@ -652,7 +652,7 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
         });
     }
     threadPool.waitForJobs();
-    XXH64_hash_t hash = XXH64(hashes.get(), numInputFiles * sizeof(XXH64_hash_t), 0);
+    XXH64_hash_t hash = XXH3_64bits(hashes.get(), numInputFiles * sizeof(XXH64_hash_t));
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
     // Check cache, exit if atlases already exist with current hash
