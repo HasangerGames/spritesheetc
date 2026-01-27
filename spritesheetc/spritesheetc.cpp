@@ -79,7 +79,7 @@ public:
         if (!m_disabled) m_start = std::chrono::steady_clock::now();
     }
 
-    void stop(const std::string& label, double threshold = 0) {
+    void stop(const std::string& label, double threshold = 0) const {
         if (m_disabled) return;
         auto elapsed = std::chrono::steady_clock::now() - m_start;
         auto ms = std::chrono::duration<double, std::milli>(elapsed).count();
@@ -654,8 +654,11 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     bool log = opts.logStatus;
     Timer total{log};
 
-    if (!std::filesystem::is_directory(opts.outputDirectory)) {
-        throw SpritesheetBuilderException("Output path does not exist or is not a directory: " + opts.outputDirectory);
+    if (
+        !std::filesystem::is_directory(opts.outputDirectory)
+        && !std::filesystem::create_directories(opts.outputDirectory)
+    ) {
+        throw SpritesheetBuilderException("Unable to create output directory: " + opts.outputDirectory);
     }
     if (opts.maxAtlasSize > 16384) {
         throw SpritesheetBuilderException(std::format("maxAtlasSize must be 16384 or less. Got {}", opts.maxAtlasSize));

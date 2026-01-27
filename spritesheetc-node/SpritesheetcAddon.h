@@ -1,5 +1,7 @@
 #pragma once
 
+#include <napi.h>
+
 class SpritesheetcAddon : public Napi::Addon<SpritesheetcAddon> {
 public:
     SpritesheetcAddon(Napi::Env, Napi::Object exports) {

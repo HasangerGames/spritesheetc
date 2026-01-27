@@ -1,41 +1,9 @@
-#pragma once
-
-#include <set>
-#include <string>
-#include <stdexcept>
-#include <vector>
-#include <cstdint>
-
-namespace spritesheetc {
-
-struct SpritesheetBuilderException final : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
-
-enum class TextureFormat {
-    /** KTX2 UASTC supercompressed with Zstandard. */
-    Ktx2,
-    /** Lossless WebP. */
-    Webp,
-    /** Standard PNG. */
-    Png,
-};
-
-enum class EncoderSpeed {
-    /** Slowest, but produces the smallest files. */
-    Slow,
-    /** In between Slow and Fast. */
-    Medium,
-    /** Fastest, but produces the largest files. */
-    Fast,
-};
-
-struct BuilderOptions {
+export interface BuilderOptions {
     /** Name of the output atlases. Default "atlas". */
-    std::string atlasName = "atlas";
+    atlasName?: string;
 
     /** Folder to output the generated atlases to. Default "output". */
-    std::string outputDirectory = "output";
+    outputDirectory?: string;
 
     /**
      * Checks if any changes have been made to the inputFiles since the last run of the spritesheet builder
@@ -44,7 +12,7 @@ struct BuilderOptions {
      * If no changes are detected, the builder will exit without building anything.
      * Default true.
      */
-    bool cache = true;
+    cache?: boolean;
 
     /**
      * Maximum size of the output directory, in bytes.
@@ -52,51 +20,51 @@ struct BuilderOptions {
      * older atlases will be deleted automatically.
      * Default 500'000'000 (500 MB).
      */
-    size_t maxOutputDirSize = 500'000'000;
+    maxOutputDirSize?: number;
 
     /** Logs the status of the spritesheet builder as it builds. Default true. */
-    bool logStatus = true;
+    logStatus?: boolean;
 
     /**
      * List of formats to output the generated atlases in.
-     * Ktx2 is KTX2 UASTC supercompressed with Zstandard.
-     * Webp is lossless WebP.
-     * Png is standard PNG.
-     * Default Webp.
+     * "ktx2" is KTX2 UASTC supercompressed with Zstandard.
+     * "webp" is lossless WebP.
+     * "png" is standard PNG.
+     * Default "webp".
      */
-    std::set<TextureFormat> formats = {TextureFormat::Webp};
+    formats?: ("ktx2" | "webp" | "png")[];
 
     /**
      * List of resolutions to output the generated atlases in.
      * Values range from 0-1. For example, 0.5 is half resolution.
      * Default 1.
      */
-    std::set<float> resolutions = {1.0f};
+    resolutions?: number[];
 
     /** Maximum allowed size of each atlas texture. Cannot be greater than 16384. Default 4096. */
-    uint16_t maxAtlasSize = 4096;
+    maxAtlasSize?: number;
 
     /** Ensures atlas dimensions are powers of two. Default false. */
-    bool powerOfTwo = false;
+    powerOfTwo?: boolean;
 
     /** Ensures atlas width and height are equal. Default false. */
-    bool square = false;
+    square?: boolean;
 
     /** Forces all atlases to maxAtlasSize. Default false. */
-    bool fixedSize = false;
+    fixedSize?: boolean;
 
     /**
      * Padding to add around each sprite, in pixels.
      * This prevents pixels from leaking between sprites.
      * Default 2.
      */
-    uint8_t padding = 2;
+    padding?: number;
 
     /** Allows sprites to be rotated 90 degrees to save atlas space. Default true. */
-    bool allowRotation = true;
+    allowRotation?: boolean;
 
     /** Removes transparent pixels from the edges of sprites to save atlas space. Default true. */
-    bool allowTrimming = true;
+    allowTrimming?: boolean;
 
     /**
      * Controls the extension added to the name of each sprite.
@@ -105,20 +73,20 @@ struct BuilderOptions {
      * If extension is ".img", the sprite will be named "foo.img".
      * Default empty string.
      */
-    std::string extension;
+    extension?: string;
 
     /** Enables multithreading. Default true. */
-    bool multithreaded = true;
+    multithreaded?: boolean;
 
     /**
      * Controls the speed of the encoder.
-     * Slow is the slowest but produces the smallest files.
-     * Medium is between Slow and Fast.
-     * Fast is the fastest but produces the largest files.
-     * Default Medium.
+     * "slow" is the slowest but produces the smallest files.
+     * "medium" is between Slow and Fast.
+     * "fast" is the fastest but produces the largest files.
+     * Default "medium".
      */
-    EncoderSpeed speed = EncoderSpeed::Medium;
-};
+    speed?: "slow" | "medium" | "fast";
+}
 
 /**
  * Builds a collection of spritesheets.
@@ -126,7 +94,7 @@ struct BuilderOptions {
  * @param opts Options for the spritesheet builder
  * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
  */
-std::vector<std::string> buildSpritesheets(const std::vector<std::string>& inputFiles, const BuilderOptions& opts = {});
+export function buildSpritesheets(inputFiles: string[], opts?: BuilderOptions): string[];
 
 /**
  * Builds a collection of spritesheets.
@@ -134,7 +102,7 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
  * @param opts Options for the spritesheet builder
  * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
  */
-std::vector<std::string> buildSpritesheetsFromDirectories(const std::vector<std::string>& inputDirectories, const BuilderOptions& opts = {});
+export function buildSpritesheetsFromDirectories(inputDirectories: string[], opts?: BuilderOptions): string[];
 
 /**
  * Builds a collection of spritesheets.
@@ -143,6 +111,4 @@ std::vector<std::string> buildSpritesheetsFromDirectories(const std::vector<std:
  * @param opts Options for the spritesheet builder
  * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
  */
-std::vector<std::string> buildSpritesheetsFromFileList(const std::string& inputFileList, const BuilderOptions& opts = {});
-
-}
+export function buildSpritesheetsFromFileList(inputFileList: string, opts?: BuilderOptions): string[];

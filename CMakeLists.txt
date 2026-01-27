@@ -4,14 +4,10 @@ project(spritesheetc)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(SPRITESHEETC_BUILD_CLI "Build spritesheetc command-line application" ON)
+option(SPRITESHEETC_STATIC "Build as static library" ON)
 
 add_subdirectory(spritesheetc)
 
-if(SPRITESHEETC_BUILD_CLI)
-    add_subdirectory(spritesheetc-cli)
-endif()
-
-#if(CMAKE_JS_VERSION)
+if(CMAKE_JS_VERSION OR NODE_ROOT_DIR)
     add_subdirectory(spritesheetc-node)
-#endif()
+endif()

@@ -2,9 +2,10 @@
   "name": "spritesheetc",
   "version": "1.0.0",
   "description": "Ridiculously fast spritesheet generator written in C++.",
-  "main": "spritesheetc-node/index.js",
+  "main": "index.js",
+  "bin": "spritesheetc.js",
   "scripts": {
-    "install": "pkg-prebuilds-verify spritesheetc-node/binding-options.js || cmake-js compile",
+    "install": "pkg-prebuilds-verify ./binding-options.js || cmake-js compile",
     "copyPrebuilds": "pkg-prebuilds-copy --baseDir build/Release --source spritesheetc.node --name=spritesheetc --strip --napi_version=8"
   },
   "keywords": [

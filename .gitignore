@@ -2,7 +2,7 @@
 .cache
 
 build
-
+build-clion
 prebuilds
-
+output
 node_modules

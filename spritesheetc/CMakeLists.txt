@@ -1,24 +1,33 @@
-add_library(spritesheetc SHARED spritesheetc.cpp)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+if (SPRITESHEETC_STATIC)
+    add_library(spritesheetc STATIC spritesheetc.cpp)
+else()
+    add_library(spritesheetc SHARED spritesheetc.cpp)
+endif()
 
 target_include_directories(spritesheetc INTERFACE ${CMAKE_CURRENT_LIST_DIR})
 
 include(FetchContent)
 
+# basis_universal
 FetchContent_Declare(
     basis_universal
     GIT_REPOSITORY https://github.com/BinomialLLC/basis_universal.git
 )
-set(BASISU_EXAMPLES FALSE CACHE "" INTERNAL FORCE)
-set(BASISU_STATIC   TRUE  CACHE "" INTERNAL FORCE)
+set(BASISU_EXAMPLES FALSE CACHE BOOL "" FORCE)
+set(BASISU_STATIC   TRUE  CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(basis_universal)
 target_include_directories(spritesheetc SYSTEM PRIVATE "${basis_universal_SOURCE_DIR}/encoder")
 
+# concurrentqueue
 FetchContent_Declare(
     concurrentqueue
     GIT_REPOSITORY https://github.com/cameron314/concurrentqueue.git
 )
 FetchContent_MakeAvailable(concurrentqueue)
 
+# glaze
 FetchContent_Declare(
     glaze
     GIT_REPOSITORY https://github.com/stephenberry/glaze.git
@@ -26,6 +35,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glaze)
 
+# zlib-ng
+set(ZLIB_COMPAT ON CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zlib-ng
+    GIT_REPOSITORY https://github.com/zlib-ng/zlib-ng.git
+    GIT_TAG develop
+)
+FetchContent_MakeAvailable(zlib-ng)
+
+# libspng
 set(BUILD_EXAMPLES OFF CACHE INTERNAL "" FORCE)
 set(SPNG_SHARED    OFF CACHE INTERNAL "" FORCE)
 FetchContent_Declare(
@@ -34,6 +55,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libspng)
 
+# libwebp
 set(WEBP_BUILD_ANIM_UTILS OFF CACHE INTERNAL "" FORCE)
 set(WEBP_BUILD_CWEBP      OFF CACHE INTERNAL "" FORCE)
 set(WEBP_BUILD_DWEBP      OFF CACHE INTERNAL "" FORCE)
@@ -51,12 +73,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libwebp)
 
+# rectpack2D
 FetchContent_Declare(
     rectpack2D
     GIT_REPOSITORY https://github.com/TeamHypersomnia/rectpack2D.git
 )
 FetchContent_MakeAvailable(rectpack2D)
 
+# resvg
 FetchContent_Declare(
     resvg
     GIT_REPOSITORY https://github.com/linebender/resvg.git
@@ -74,23 +98,13 @@ set_target_properties(resvg PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
+# xxHash
 FetchContent_Declare(
     xxHash
     GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
     GIT_TAG dev
 )
 FetchContent_MakeAvailable(xxHash)
-
-set(ZLIB_COMPAT ON CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON) # keeps zlib-ng from blowing up when compiling the node addon
-FetchContent_Declare(
-    zlib-ng
-    GIT_REPOSITORY https://github.com/zlib-ng/zlib-ng.git
-    GIT_TAG develop
-)
-FetchContent_MakeAvailable(zlib-ng)
 
 target_link_libraries(spritesheetc PUBLIC
     basisu_encoder
