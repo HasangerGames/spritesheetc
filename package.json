@@ -6,7 +6,7 @@
   "bin": "spritesheetc.js",
   "scripts": {
     "install": "pkg-prebuilds-verify ./binding-options.js || cmake-js compile",
-    "copyPrebuilds": "pkg-prebuilds-copy --baseDir build/Release --source spritesheetc.node --name=spritesheetc --strip --napi_version=8"
+    "copyPrebuild": "pkg-prebuilds-copy --baseDir build/Release --source spritesheetc.node --name=spritesheetc --strip --napi_version=8"
   },
   "keywords": [
     "c++",

@@ -31,7 +31,7 @@ public:
         m_remainingJobs.store(numJobs, std::memory_order_relaxed);
     }
 
-    void queueJob(std::move_only_function<void()> job) {
+    void queueJob(std::function<void()> job) {
         if (m_threads.empty()) {
             job();
         } else {
@@ -54,11 +54,12 @@ public:
         for (size_t i = 0; i < m_threads.size(); ++i) {
             m_queue.enqueue(nullptr);
         }
+        for (std::thread& thread : m_threads) thread.join();
     }
 private:
     void threadLoop() {
         while (true) {
-            std::move_only_function<void()> job;
+            std::function<void()> job;
             thread_local moodycamel::ConsumerToken token{m_queue};
             m_queue.wait_dequeue(token, job);
             if (job == nullptr) return; // null job = shutdown signal
@@ -68,9 +69,9 @@ private:
             }
         }
     }
-    moodycamel::BlockingConcurrentQueue<std::move_only_function<void()>> m_queue;
+    moodycamel::BlockingConcurrentQueue<std::function<void()>> m_queue;
     std::atomic<size_t> m_remainingJobs;
-    std::vector<std::jthread> m_threads;
+    std::vector<std::thread> m_threads;
 };
 
 class Timer {
@@ -588,12 +589,12 @@ std::string getExtension(TextureFormat format) {
 }
 
 std::string getBasePath(const BuilderOptions& opts, float scale, XXH64_hash_t hash) {
-    return std::filesystem::path(opts.outputDir) / std::format(
+    return (std::filesystem::path(opts.outputDir) / std::format(
         "{}@{}x-{:x}",
         opts.atlasName,
         scale,
         hash
-    );
+    )).string();
 }
 
 void encodeAtlas(
@@ -650,7 +651,7 @@ void encodeAtlas(
 
 void readPath(const std::string& inputPath, std::vector<std::string>& files) {
     std::filesystem::path path{inputPath};
-    std::string extension = path.extension();
+    std::string extension = path.extension().string();
     if (extension == ".svg") {
         files.emplace_back(inputPath);
     } else if (extension == ".txt") {
@@ -670,10 +671,10 @@ void readPath(const std::string& inputPath, std::vector<std::string>& files) {
         for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path)) {
             if (entry.is_directory()) continue;
 
-            std::filesystem::path filePath = entry.path();
+            const std::filesystem::path& filePath = entry.path();
             if (filePath.extension() != ".svg") continue;
 
-            files.emplace_back(filePath);
+            files.emplace_back(filePath.string());
         }
     } else {
         throw SpritesheetBuilderException("Unsupported file type: " + inputPath);
@@ -766,7 +767,7 @@ std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
     std::map<std::filesystem::file_time_type, std::filesystem::directory_entry> files;
     std::string hashStr = std::format("{:x}", hash);
     for (const std::filesystem::directory_entry& path : std::filesystem::directory_iterator(opts.outputDir)) {
-        std::string filename = path.path().filename();
+        std::string filename = path.path().filename().string();
         if (filename.contains(hashStr)) continue; // skip files with current hash
         outputDirSize += path.file_size();
         if (!filename.ends_with(".cache")) continue;

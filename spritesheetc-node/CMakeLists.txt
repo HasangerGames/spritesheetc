@@ -18,7 +18,14 @@ if(NOT DEFINED CMAKE_JS_INC)
 endif()
 target_include_directories(spritesheetc-node PRIVATE ${CMAKE_JS_INC})
 
-target_link_libraries(spritesheetc-node PUBLIC spritesheetc)
+target_link_libraries(spritesheetc-node PUBLIC
+    spritesheetc
+    ${CMAKE_JS_LIB}
+)
+# i hate you windows
+if (WIN32)
+    target_link_libraries(spritesheetc-node PUBLIC ntdll)
+endif()
 
 if(MSVC AND CMAKE_JS_NODELIB_DEF AND CMAKE_JS_NODELIB_TARGET)
     # Generate node.lib

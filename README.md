@@ -22,9 +22,9 @@ The generated JSON is compatible with a number of popular engines, including [Gl
 [Node.js](https://nodejs.org) is required, for which [nvm](https://github.com/nvm-sh/nvm) is the preferred method of installation if you're running Linux or macOS.
 ```shell
 $ npm i -g spritesheetc
+```
+```
 $ spritesheetc -h
-```
-```
 Usage: spritesheetc [options]
 
 High-performance spritesheet generator
