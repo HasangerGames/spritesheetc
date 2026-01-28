@@ -449,18 +449,18 @@ void encodeWebp(SubAtlas& subAtlas, std::FILE* file, const BuilderOptions& opts,
     config.lossless = true;
     config.thread_level = opts.multithreaded;
     switch (opts.speed) {
-    case EncoderSpeed::Slow:
-        config.method = 6;
-        config.quality = 100;
-        break;
-    case EncoderSpeed::Medium:
-        config.method = 3;
-        config.quality = 50;
-        break;
-    case EncoderSpeed::Fast:
-        config.method = 0;
-        config.quality = 0;
-        break;
+        case EncoderSpeed::Slow:
+            config.method = 6;
+            config.quality = 100;
+            break;
+        case EncoderSpeed::Medium:
+            config.method = 3;
+            config.quality = 50;
+            break;
+        case EncoderSpeed::Fast:
+            config.method = 0;
+            config.quality = 0;
+            break;
     }
 
     WebPPicture picture;
@@ -513,15 +513,15 @@ void encodeKtx2(SubAtlas& subAtlas, std::FILE* file, const BuilderOptions& opts,
         params.m_pack_uastc_ldr_4x4_flags = basisu::cFlagThreaded;
     }
     switch (opts.speed) {
-    case EncoderSpeed::Slow:
-        params.m_ktx2_zstd_supercompression_level = 22;
-        break;
-    case EncoderSpeed::Medium:
-        params.m_ktx2_zstd_supercompression_level = 6;
-        break;
-    case EncoderSpeed::Fast:
-        params.m_ktx2_zstd_supercompression_level = 1;
-        break;
+        case EncoderSpeed::Slow:
+            params.m_ktx2_zstd_supercompression_level = 22;
+            break;
+        case EncoderSpeed::Medium:
+            params.m_ktx2_zstd_supercompression_level = 6;
+            break;
+        case EncoderSpeed::Fast:
+            params.m_ktx2_zstd_supercompression_level = 1;
+            break;
     }
 
     basisu::image image;
@@ -576,19 +576,19 @@ void encodePng(SubAtlas& subAtlas, std::FILE* file) {
 
 std::string getExtension(TextureFormat format) {
     switch (format) {
-    case TextureFormat::Ktx2:
-        return "ktx2";
-    case TextureFormat::Webp:
-        return "webp";
-    case TextureFormat::Png:
-        return "png";
-    default:
-        std::unreachable();
+        case TextureFormat::Ktx2:
+            return "ktx2";
+        case TextureFormat::Webp:
+            return "webp";
+        case TextureFormat::Png:
+            return "png";
+        default:
+            std::unreachable();
     }
 }
 
 std::string getBasePath(const BuilderOptions& opts, float scale, XXH64_hash_t hash) {
-    return std::filesystem::path(opts.outputDirectory) / std::format(
+    return std::filesystem::path(opts.outputDir) / std::format(
         "{}@{}x-{:x}",
         opts.atlasName,
         scale,
@@ -632,15 +632,15 @@ void encodeAtlas(
                 }
                 std::setvbuf(file, nullptr, _IOFBF, 1'000'000); // 1 MB buffer
                 switch (format) {
-                case TextureFormat::Ktx2:
-                    encodeKtx2(subAtlas, file, opts, basisPool);
-                    break;
-                case TextureFormat::Webp:
-                    encodeWebp(subAtlas, file, opts, argb);
-                    break;
-                case TextureFormat::Png:
-                    encodePng(subAtlas, file);
-                    break;
+                    case TextureFormat::Ktx2:
+                        encodeKtx2(subAtlas, file, opts, basisPool);
+                        break;
+                    case TextureFormat::Webp:
+                        encodeWebp(subAtlas, file, opts, argb);
+                        break;
+                    case TextureFormat::Png:
+                        encodePng(subAtlas, file);
+                        break;
                 }
                 std::fclose(file);
             });
@@ -648,30 +648,76 @@ void encodeAtlas(
     }
 }
 
+void readPath(const std::string& inputPath, std::vector<std::string>& files) {
+    std::filesystem::path path{inputPath};
+    std::string extension = path.extension();
+    if (extension == ".svg") {
+        files.emplace_back(inputPath);
+    } else if (extension == ".txt") {
+        std::ifstream inputFile{path};
+        std::string filePath;
+        while (std::getline(inputFile, filePath)) {
+            // allow comments and blank lines
+            if (
+                filePath.starts_with("#")
+                || filePath.empty()
+                || std::ranges::all_of(filePath, isspace)
+            ) continue;
+
+            readPath(filePath, files);
+        }
+    } else if (extension.empty() && std::filesystem::is_directory(path)) {
+        for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path)) {
+            if (entry.is_directory()) continue;
+
+            std::filesystem::path filePath = entry.path();
+            if (filePath.extension() != ".svg") continue;
+
+            files.emplace_back(filePath);
+        }
+    } else {
+        throw SpritesheetBuilderException("Unsupported file type: " + inputPath);
+    }
+}
+
 namespace spritesheetc {
 
-std::vector<std::string> buildSpritesheets(const std::vector<std::string>& inputFiles, const BuilderOptions& opts) {
+std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
     bool log = opts.logStatus;
     Timer total{log};
 
-    if (
-        !std::filesystem::is_directory(opts.outputDirectory)
-        && !std::filesystem::create_directories(opts.outputDirectory)
-    ) {
-        throw SpritesheetBuilderException("Unable to create output directory: " + opts.outputDirectory);
+    if (opts.inputs.empty()) {
+        throw SpritesheetBuilderException("No inputs specified");
     }
+
+    std::vector<std::string> inputFiles;
+    for (const std::string& input : opts.inputs) {
+        readPath(input, inputFiles);
+    }
+    std::ranges::sort(inputFiles);
+
+    if (
+        !std::filesystem::is_directory(opts.outputDir)
+        && !std::filesystem::create_directories(opts.outputDir)
+    ) {
+        throw SpritesheetBuilderException("Unable to create output directory: " + opts.outputDir);
+    }
+
     if (opts.maxAtlasSize > 16384) {
         throw SpritesheetBuilderException(std::format("maxAtlasSize must be 16384 or less. Got {}", opts.maxAtlasSize));
     }
-    // TODO For each scale, check if scale * maxAtlasSize exceeds 16384
+
+    for (float scale : opts.resolutions) {
+        if (scale < 0.25 || scale > 1) {
+            throw SpritesheetBuilderException(std::format("Invalid resolution: {}. Must be between 0.25 and 1", scale));
+        }
+    }
 
     // Create the thread pool
     uint16_t numThreads = opts.multithreaded
         ? std::max(1u, std::thread::hardware_concurrency())
         : 1;
     ThreadPool threadPool{numThreads};
-
-    std::vector<std::string> outputFiles;
 
     // Phase 1: Load sprites, create a hash from all SVG files and paths
     Timer load{log};
@@ -689,6 +735,7 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
     // Check cache, exit if atlases already exist with current hash
+    std::vector<std::string> outputFiles;
     std::set<std::pair<TextureFormat, float>> cachedFormats;
     if (opts.cache) {
         bool allExist = true;
@@ -718,7 +765,7 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
     size_t outputDirSize = 0;
     std::map<std::filesystem::file_time_type, std::filesystem::directory_entry> files;
     std::string hashStr = std::format("{:x}", hash);
-    for (const std::filesystem::directory_entry& path : std::filesystem::directory_iterator(opts.outputDirectory)) {
+    for (const std::filesystem::directory_entry& path : std::filesystem::directory_iterator(opts.outputDir)) {
         std::string filename = path.path().filename();
         if (filename.contains(hashStr)) continue; // skip files with current hash
         outputDirSize += path.file_size();
@@ -810,46 +857,6 @@ std::vector<std::string> buildSpritesheets(const std::vector<std::string>& input
 
     total.stop("[spritesheetc] Done. Total time");
     return outputFiles;
-}
-
-void readDirectory(const std::filesystem::path& path, std::vector<std::string>& files) {
-    for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(path)) {
-        if (entry.is_directory()) continue;
-
-        std::filesystem::path filePath = entry.path();
-        if (filePath.extension() != ".svg") continue;
-
-        files.emplace_back(filePath);
-    }
-}
-
-std::vector<std::string> buildSpritesheetsFromDirectories(const std::vector<std::string>& inputDirectories, const BuilderOptions& opts) {
-    std::vector<std::string> files;
-    for (const std::string& pathStr : inputDirectories) {
-        readDirectory(pathStr, files);
-    }
-    return buildSpritesheets(files, opts);
-}
-
-std::vector<std::string> buildSpritesheetsFromFileList(const std::string& inputFileList, const BuilderOptions& opts) {
-    std::vector<std::string> files;
-    std::ifstream inputFile{inputFileList};
-    std::string pathStr;
-    while (std::getline(inputFile, pathStr)) {
-        if (pathStr.starts_with("#")) continue; // allow comments
-
-        std::filesystem::path path{pathStr};
-        if (path.extension() != ".svg") {
-            throw SpritesheetBuilderException("Non-SVG file specified in file list: " + pathStr);
-        }
-        if (std::filesystem::is_directory(path)) {
-            readDirectory(path, files);
-            continue;
-        }
-
-        files.emplace_back(pathStr);
-    }
-    return buildSpritesheets(files, opts);
 }
 
 }

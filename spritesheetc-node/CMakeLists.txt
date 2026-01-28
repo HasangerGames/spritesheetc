@@ -12,7 +12,7 @@ set_target_properties(spritesheetc-node PROPERTIES
 # Requires NODE_ROOT_DIR to be defined (-DNODE_ROOT_DIR=...)
 if(NOT DEFINED CMAKE_JS_INC)
     set(CMAKE_JS_INC
-        "../node_modules/node-addon-api"
+        "${CMAKE_SOURCE_DIR}/node_modules/node-addon-api"
         "${NODE_ROOT_DIR}/include/node"
     )
 endif()

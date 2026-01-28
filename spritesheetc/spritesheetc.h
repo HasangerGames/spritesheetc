@@ -31,31 +31,20 @@ enum class EncoderSpeed {
 };
 
 struct BuilderOptions {
-    /** Name of the output atlases. Default "atlas". */
-    std::string atlasName = "atlas";
+    /**
+     * Paths to inputs.
+     * Each must be a .svg file,
+     * a directory containing .svg files,
+     * or a .txt file containing a newline-separated list of said files or directories,
+     * where lines starting with # are ignored.
+     */
+    std::vector<std::string> inputs;
 
     /** Folder to output the generated atlases to. Default "output". */
-    std::string outputDirectory = "output";
+    std::string outputDir = "output";
 
-    /**
-     * Checks if any changes have been made to the inputFiles since the last run of the spritesheet builder
-     * (i.e. if atlases containing the inputFiles exist in the output directory).
-     * This check is based on the combined hashes of the inputFiles.
-     * If no changes are detected, the builder will exit without building anything.
-     * Default true.
-     */
-    bool cache = true;
-
-    /**
-     * Maximum size of the output directory, in bytes.
-     * If the total size of the atlases in the output directory exceeds this size,
-     * older atlases will be deleted automatically.
-     * Default 500'000'000 (500 MB).
-     */
-    size_t maxOutputDirSize = 500'000'000;
-
-    /** Logs the status of the spritesheet builder as it builds. Default true. */
-    bool logStatus = true;
+    /** Name of the output atlases. Default "atlas". */
+    std::string atlasName = "atlas";
 
     /**
      * List of formats to output the generated atlases in.
@@ -68,10 +57,19 @@ struct BuilderOptions {
 
     /**
      * List of resolutions to output the generated atlases in.
-     * Values range from 0-1. For example, 0.5 is half resolution.
+     * Values range from 0.25-1. For example, 0.5 is half resolution.
      * Default 1.
      */
     std::set<float> resolutions = {1.0f};
+
+    /**
+     * Controls the speed of the encoder.
+     * Slow is the slowest but produces the smallest files.
+     * Medium is between Slow and Fast.
+     * Fast is the fastest but produces the largest files.
+     * Default Medium.
+     */
+    EncoderSpeed speed = EncoderSpeed::Medium;
 
     /** Maximum allowed size of each atlas texture. Cannot be greater than 16384. Default 4096. */
     uint16_t maxAtlasSize = 4096;
@@ -107,42 +105,35 @@ struct BuilderOptions {
      */
     std::string extension;
 
-    /** Enables multithreading. Default true. */
-    bool multithreaded = true;
+    /**
+     * Maximum size of the output directory, in bytes.
+     * If the total size of the atlases in the output directory exceeds this size,
+     * older atlases will be deleted automatically.
+     * Default 500'000'000 (500 MB).
+     */
+    size_t maxOutputDirSize = 500'000'000;
 
     /**
-     * Controls the speed of the encoder.
-     * Slow is the slowest but produces the smallest files.
-     * Medium is between Slow and Fast.
-     * Fast is the fastest but produces the largest files.
-     * Default Medium.
+     * Checks if any changes have been made to the input files since the last run of the spritesheet builder
+     * (i.e. if atlases containing the input files exist in the output directory).
+     * This check is based on the combined hashes of the input files.
+     * If no changes are detected, the builder will exit without building anything.
+     * Default true.
      */
-    EncoderSpeed speed = EncoderSpeed::Medium;
+    bool cache = true;
+
+    /** Logs the status of the spritesheet builder as it builds. Default true. */
+    bool logStatus = true;
+
+    /** Enables multithreading. Default true. */
+    bool multithreaded = true;
 };
 
 /**
  * Builds a collection of spritesheets.
- * @param inputFiles Paths to the input files. Each must be in SVG format
  * @param opts Options for the spritesheet builder
  * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
  */
-std::vector<std::string> buildSpritesheets(const std::vector<std::string>& inputFiles, const BuilderOptions& opts = {});
-
-/**
- * Builds a collection of spritesheets.
- * @param inputDirectories Paths to the input directories, which will be recursively searched for SVG files
- * @param opts Options for the spritesheet builder
- * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
- */
-std::vector<std::string> buildSpritesheetsFromDirectories(const std::vector<std::string>& inputDirectories, const BuilderOptions& opts = {});
-
-/**
- * Builds a collection of spritesheets.
- * @param inputFileList Path to a text file containing a list of file/directory paths separated by newlines. Lines starting with # will be ignored.
- *                      Files must be in SVG format. Directories will be recursively searched for SVG files.
- * @param opts Options for the spritesheet builder
- * @return Paths to the outputted images. To access the metadata associated with an image, simply add ".json" to the path
- */
-std::vector<std::string> buildSpritesheetsFromFileList(const std::string& inputFileList, const BuilderOptions& opts = {});
+std::vector<std::string> buildSpritesheets(const BuilderOptions& opts);
 
 }

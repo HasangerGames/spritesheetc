@@ -19,40 +19,65 @@ Three output formats are supported:
 The generated JSON is compatible with a number of popular engines, including [Glimmerite](https://github.com/HasangerGames/glimmerite) and [PixiJS](https://github.com/pixijs/pixijs).
 
 ## Using the CLI
-[Node.js](https://nodejs.org) is required, for which [nvm](https://github.com/nvm-sh/nvm) is the preferred method of installation if you're using Linux or macOS.
+[Node.js](https://nodejs.org) is required, for which [nvm](https://github.com/nvm-sh/nvm) is the preferred method of installation if you're running Linux or macOS.
 ```shell
-npm i -g spritesheetc
-spritesheetc -h
+$ npm i -g spritesheetc
+$ spritesheetc -h
+```
+```
+Usage: spritesheetc [options]
+
+High-performance spritesheet generator
+
+Options:
+  -V, --version                       output the version number
+  -i, --inputs <files...>             inputs (REQUIRED): .svg files, directories containing .svg files, or .txt lists of files/directories (newline-separated, lines starting with # ignored)
+  -o, --output-dir <directory>        directory to output atlases to (default: "output")
+  -n, --atlas-name <name>             name of output atlases (default: "atlas")
+  -f, --formats <formats...>          output texture formats (choices: "ktx2", "webp", "png", default: ["webp"])
+  -r, --resolutions <resolutions...>  output resolutions, must be between 0.25-1 (default: [1])
+  -s, --speed <speed>                 encoding speed: slow means smaller files, fast means larger files (choices: "slow", "medium", "fast", default: "medium")
+  -a, --max-atlas-size <size>         max size of each atlas texture, cannot be greater than 16384 (default: 4096)
+  -t, --power-of-two                  ensures atlas dimensions are powers of two (default: false)
+  -u, --square                        ensures atlas width and height are equal (default: false)
+  -x, --fixed-size                    forces all atlases to max-atlas-size (default: false)
+  -p, --padding <pixels>              adds padding around sprites to prevent pixels leaking (default: 2)
+  -l, --no-allow-rotation             disables rotating sprites 90 degrees to save atlas space
+  -g, --no-allow-trimming             disables removing transparent pixels from the edges of sprites to save atlas space
+  -e, --extension <extension>         extension to add to sprite names (default: "")
+  -z, --max-output-dir-size <size>    max size of output directory in bytes, deleting old atlases if exceeded (default: 500,000,000 = 500 MB)
+  -c, --no-cache                      disables cache
+  -q, --no-log-status                 disables logging
+  -m, --no-multithreaded              disables multithreading
+  -h, --help                          display help for command
 ```
 
 ## Using the Node.js API
 
 ### Installation
 ```shell
-npm i spritesheetc
+$ npm i spritesheetc
 ```
 
 ### Usage
 ```js
 // ES6 Modules/TypeScript
-import { buildSpritesheets, buildSpritesheetsFromDirectories } from "spritesheetc";
+import { buildSpritesheets } from "spritesheetc";
 
 // Traditional Node.js
-const { buildSpritesheets, buildSpritesheetsFromDirectories } = require("spritesheetc");
+const { buildSpritesheets } = require("spritesheetc");
 
-// Basic usage
-const result = buildSpritesheets(["file1.svg", "file2.svg"]);
-console.log(result); // 
+const files = buildSpritesheets({
+    // List of .svg files, directories containing .svg files, or .txt lists of files/directories
+    inputs: ["path/to/images"],
 
-// Advanced usage
-buildSpritesheetsFromDirectories(["path/to/images"], {
+    // Generated files will be outputted here
+    outputDir: "path/to/destination",
+
     // Names of the generated files will start with this
     atlasName: "myAtlas",
 
-    // Generated files will be outputted here
-    outputDirectory: "path/to/destination",
-
-    // Generates two formats of atlas, PNG and lossless WebP. Options are "ktx2", "webp", and "png"
+    // Generates two formats of atlas, PNG and WebP. Options are "ktx2", "webp", and "png"
     formats: ["png", "webp"],
 
     // Generates two sizes of atlas for each format, half resolution and full resolution
@@ -61,6 +86,13 @@ buildSpritesheetsFromDirectories(["path/to/images"], {
     // Fastest speed, largest file size. Options are "slow", "medium", and "fast"
     speed: "fast",
 });
+console.log(files);
+
+// Example output:
+// [
+//   'output/atlas@1x-396de2aad2cb2bc6-1.webp',
+//   'output/atlas@1x-396de2aad2cb2bc6-1.png'
+// ]
 ```
 See [index.d.ts](index.d.ts) for details, and [spritesheetc.js](spritesheetc.js) for example usage.
 
@@ -79,7 +111,7 @@ target_link_libraries(myapp PRIVATE spritesheetc)
 
 Using a Git submodule:
 ```shell
-git submodule add https://github.com/HasangerGames/spritesheetc.git vendored/spritesheetc
+$ git submodule add https://github.com/HasangerGames/spritesheetc.git vendored/spritesheetc
 ```
 
 ```cmake
@@ -91,23 +123,25 @@ Replace `myapp` with the name of your CMake target. Replace `vendored` with the 
 
 ### Usage
 ```cpp
+#include <vector>
+#include <string>
+#include <iostream>
 #include <spritesheetc.h>
 
 using namespace spritesheetc;
 
 int main() {
-    // Basic usage
-    buildSpritesheets({"file1.svg", "file2.svg"});
+    std::vector<std::string> files = buildSpritesheets({
+        // List of .svg files, directories containing .svg files, or .txt lists of files/directories
+        .inputs = {"path/to/images"},
     
-    // Advanced usage
-    buildSpritesheetsFromDirectories({"path/to/images"}, {
+        // Generated files will be outputted here
+        .outputDir = "path/to/destination",
+        
         // Names of the generated files will start with this
         .atlasName = "myAtlas",
         
-        // Generated files will be outputted here
-        .outputDirectory = "path/to/destination",
-        
-        // Generates two formats of atlas, PNG and lossless WebP. Options are Ktx2, Webp, and Png
+        // Generates two formats of atlas, PNG and WebP. Options are Ktx2, Webp, and Png
         .formats = {TextureFormat::Png, TextureFormat::Webp},
         
         // Generates two sizes of atlas for each format, half resolution and full resolution
@@ -116,6 +150,14 @@ int main() {
         // Fastest speed, largest file size. Options are Slow, Medium, and Fast
         .speed = EncoderSpeed::Fast,
     });
+    
+    for (const std::string& file : files) {
+        std::cout << file << '\n';
+    }
+    
+    // Example output:
+    // output/atlas@1x-396de2aad2cb2bc6-1.webp
+    // output/atlas@1x-396de2aad2cb2bc6-1.png
 }
 ```
 See [spritesheetc.h](spritesheetc/spritesheetc.h) for details, and [SpritesheetcAddon.cpp](spritesheetc-node/SpritesheetcAddon.cpp) for example usage.
@@ -126,12 +168,11 @@ See [spritesheetc.h](spritesheetc/spritesheetc.h) for details, and [Spritesheetc
 - Git
 - C++23 or later
 - CMake 3.31 or later
-- Ninja
 - Rust
 - Node.js
 
 ```shell
 git clone https://github.com/HasangerGames/spritesheetc.git
 cd spritesheetc
-pnpm install
+npm i --build-from-source
 ```

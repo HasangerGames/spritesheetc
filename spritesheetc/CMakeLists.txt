@@ -87,6 +87,8 @@ FetchContent_Declare(
     GIT_TAG main
 )
 FetchContent_MakeAvailable(resvg)
+set(ENV{CARGO_PROFILE_RELEASE_LTO} "true")
+set(ENV{CARGO_PROFILE_RELEASE_STRIP} "true")
 execute_process(
     COMMAND cargo build --release
     WORKING_DIRECTORY "${resvg_SOURCE_DIR}/crates/c-api"

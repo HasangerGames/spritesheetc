@@ -11,6 +11,7 @@
   "keywords": [
     "c++",
     "spritesheet",
+    "glimmerite",
     "texturepacker",
     "svg",
     "resvg"
@@ -24,8 +25,8 @@
     ]
   },
   "dependencies": {
-    "@types/node": "^25.0.9",
     "cmake-js": "^7.4.0",
+    "commander": "^14.0.2",
     "node-addon-api": "^8.5.0",
     "pkg-prebuilds": "^1.0.0"
   }
