@@ -1,11 +1,5 @@
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_program(SCCACHE_PROGRAM sccache)
-if(SCCACHE_PROGRAM)
-    set(CMAKE_C_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
-    set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
-endif()
-
 if (SPRITESHEETC_STATIC)
     add_library(spritesheetc STATIC spritesheetc.cpp)
 else()
