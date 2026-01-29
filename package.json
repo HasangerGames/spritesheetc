@@ -1,9 +1,11 @@
 {
   "name": "spritesheetc",
-  "version": "1.0.0",
+  "version": "1.0.0-alpha3",
   "description": "Ridiculously fast spritesheet generator written in C++.",
   "main": "index.js",
-  "bin": "spritesheetc.js",
+  "bin": {
+    "spritesheetc": "spritesheetc.js"
+  },
   "scripts": {
     "install": "pkg-prebuilds-verify ./binding-options.js || cmake-js compile",
     "copyPrebuild": "pkg-prebuilds-copy --baseDir build/Release --source spritesheetc.node --name=spritesheetc --strip --napi_version=8"
@@ -23,6 +25,9 @@
     "napi_versions": [
       8
     ]
+  },
+  "repository": {
+    "url": "https://github.com/HasangerGames/spritesheetc"
   },
   "dependencies": {
     "cmake-js": "^7.4.0",
