@@ -82,9 +82,9 @@ export interface BuilderOptions {
     maxOutputDirSize?: number;
 
     /**
-     * Checks if any changes have been made to the inputFiles since the last run of the spritesheet builder
-     * (i.e. if atlases containing the inputFiles exist in the output directory).
-     * This check is based on the combined hashes of the inputFiles.
+     * Checks if any changes have been made to the inputs since the last run of the spritesheet builder
+     * (i.e. if atlases containing all the inputs exist in the output directory).
+     * This check is based on the combined hashes of the inputs.
      * If no changes are detected, the builder will exit without building anything.
      * Default true.
      */

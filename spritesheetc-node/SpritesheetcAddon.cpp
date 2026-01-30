@@ -122,7 +122,7 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
             opts.speed = EncoderSpeed::Medium;
         } else if (speed == "fast") {
             opts.speed = EncoderSpeed::Fast;
-        } else {
+        } else if (!speed.empty()) {
             typeError("Unsupported speed: " + speed + ". Expected one of: slow, medium, fast");
         }
 

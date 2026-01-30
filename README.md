@@ -11,12 +11,12 @@ It is designed around rendering SVGs as quickly and accurately as possible.
 ## Supported formats
 Currently, only SVG input is supported.
 
-Three output formats are supported:
+Output is comprised of JSON metadata, as well as images in any of three formats:
 - KTX2 UASTC supercompressed with Zstandard
 - Lossless WebP
 - PNG
 
-The generated JSON is compatible with a number of popular engines, including [Glimmerite](https://github.com/HasangerGames/glimmerite) and [PixiJS](https://github.com/pixijs/pixijs).
+Output is compatible with a number of engines including [Glimmerite](https://github.com/HasangerGames/glimmerite) and [PixiJS](https://github.com/pixijs/pixijs).
 
 ## Using the CLI
 [Node.js](https://nodejs.org) is required, for which [nvm](https://github.com/nvm-sh/nvm) is the preferred method of installation if you're running Linux or macOS.
@@ -61,10 +61,10 @@ $ npm i spritesheetc
 
 ### Usage
 ```js
-// ES6 Modules/TypeScript
+// ESM/TypeScript
 import { buildSpritesheets } from "spritesheetc";
 
-// Traditional Node.js
+// CommonJS/Node.js
 const { buildSpritesheets } = require("spritesheetc");
 
 const files = buildSpritesheets({
