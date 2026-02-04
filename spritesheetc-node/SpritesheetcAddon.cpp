@@ -10,18 +10,17 @@ using namespace spritesheetc;
 Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
-    try {
-        auto typeError = [&](const std::string& msg) {
-            Napi::TypeError::New(env, msg).ThrowAsJavaScriptException();
-            throw std::runtime_error("Type error");
-        };
+    struct TypeError : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
 
+    try {
         if (info.Length() != 1) {
-            typeError(std::format("Wrong number of arguments: expected 1, got {}", info.Length()));
+            throw TypeError(std::format("Wrong number of arguments: expected 1, got {}", info.Length()));
         }
 
         if (!info[0].IsObject()) {
-            typeError("Argument must be an object");
+            throw TypeError("Argument must be an object");
         }
         auto jsOpts = info[0].As<Napi::Object>();
         BuilderOptions opts;
@@ -30,7 +29,7 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
             if (!jsOpts.Has(propName)) return;
             Napi::Value value = jsOpts.Get(propName);
             if (!value.IsString()) {
-                typeError(propName + " must be a string");
+                throw TypeError(propName + " must be a string");
             }
             dest = value.As<Napi::String>();
         };
@@ -39,7 +38,7 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
             if (!jsOpts.Has(propName)) return;
             Napi::Value value = jsOpts.Get(propName);
             if (!value.IsBoolean()) {
-                typeError(propName + " must be a boolean");
+                throw TypeError(propName + " must be a boolean");
             }
             dest = value.As<Napi::Boolean>().Value();
         };
@@ -48,24 +47,24 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
             if (!jsOpts.Has(propName)) return;
             Napi::Value value = jsOpts.Get(propName);
             if (!value.IsNumber()) {
-                typeError(propName + " must be a number");
+                throw TypeError(propName + " must be a number");
             }
             dest = value.As<Napi::Number>().Int64Value();
         };
         
         if (!jsOpts.Has("inputs")) {
-            typeError("inputs not specified");
+            throw TypeError("inputs not specified");
         }
         Napi::Value rawInputs = jsOpts.Get("inputs");
         if (!rawInputs.IsArray()) {
-            typeError("inputs must be an array");
+            throw TypeError("inputs must be an array");
         }
         auto jsInputs = rawInputs.As<Napi::Array>();
         opts.inputs.reserve(jsInputs.Length());
         for (uint32_t i = 0; i < jsInputs.Length(); ++i) {
             Napi::Value rawInput = jsInputs.Get(i);
             if (!rawInput.IsString()) {
-                typeError("inputs must contain only strings");
+                throw TypeError("inputs must contain only strings");
             }
             opts.inputs.emplace_back(rawInput.As<Napi::String>());
         }
@@ -76,14 +75,14 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
         if (jsOpts.Has("formats")) {
             Napi::Value rawFormats = jsOpts.Get("formats");
             if (!rawFormats.IsArray()) {
-                typeError("formats must be an array");
+                throw TypeError("formats must be an array");
             }
             auto jsFormats = rawFormats.As<Napi::Array>();
             opts.formats = {};
             for (uint32_t i = 0; i < jsFormats.Length(); ++i) {
                 Napi::Value rawFormat = jsFormats.Get(i);
                 if (!rawFormat.IsString()) {
-                    typeError("formats must contain only strings");
+                    throw TypeError("formats must contain only strings");
                 }
                 std::string format = rawFormat.As<Napi::String>().Utf8Value();
                 if (format == "ktx2") {
@@ -93,7 +92,7 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
                 } else if (format == "png") {
                     opts.formats.emplace(TextureFormat::Png);
                 } else {
-                    typeError("Unsupported format: " + format + ". Expected one of: ktx2, webp, png");
+                    throw TypeError("Unsupported format: " + format + ". Expected one of: ktx2, webp, png");
                 }
             }
         }
@@ -101,14 +100,14 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
         if (jsOpts.Has("resolutions")) {
             Napi::Value rawResolutions = jsOpts.Get("resolutions");
             if (!rawResolutions.IsArray()) {
-                typeError("resolutions must be an array");
+                throw TypeError("resolutions must be an array");
             }
             auto jsResolutions = rawResolutions.As<Napi::Array>();
             opts.resolutions = {};
             for (uint32_t i = 0; i < jsResolutions.Length(); ++i) {
                 Napi::Value rawResolution = jsResolutions.Get(i);
                 if (!rawResolution.IsNumber()) {
-                    typeError("resolutions must contain only numbers");
+                    throw TypeError("resolutions must contain only numbers");
                 }
                 opts.resolutions.emplace(rawResolution.As<Napi::Number>().FloatValue());
             }
@@ -123,7 +122,7 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
         } else if (speed == "fast") {
             opts.speed = EncoderSpeed::Fast;
         } else if (!speed.empty()) {
-            typeError("Unsupported speed: " + speed + ". Expected one of: slow, medium, fast");
+            throw TypeError("Unsupported speed: " + speed + ". Expected one of: slow, medium, fast");
         }
 
         getNumber("maxAtlasSize", opts.maxAtlasSize);
@@ -145,9 +144,11 @@ Napi::Value SpritesheetcAddon::buildSpritesheets(const Napi::CallbackInfo& info)
             jsOutputs.Set(i, Napi::String::New(env, outputs[i]));
         }
         return jsOutputs;
-    } catch (const SpritesheetBuilderException& e) {
+    } catch (const TypeError& e) {
+        Napi::TypeError::New(env, e.what()).ThrowAsJavaScriptException();
+    } catch (const std::runtime_error& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
-    } catch (const std::runtime_error&) { }
+    }
 
     return env.Null();
 }
