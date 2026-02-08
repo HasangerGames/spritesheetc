@@ -7,70 +7,13 @@
 #include "spng.h"
 #include "rectpack2D/finders_interface.h"
 #include "webp/encode.h"
-#include "blockingconcurrentqueue.h"
+#include "BS_thread_pool.hpp"
 #include "xxhash.h"
 #include "glaze/glaze.hpp"
 
 #include "spritesheetc.h"
 
 using namespace spritesheetc;
-
-class ThreadPool {
-public:
-    explicit ThreadPool(uint16_t numThreads) {
-        if (numThreads == 1) return;
-        m_threads.reserve(numThreads);
-        for (uint16_t i = 0; i < numThreads; ++i) {
-            m_threads.emplace_back(&ThreadPool::threadLoop, this);
-        }
-    }
-    ~ThreadPool() { shutdown(); }
-
-    void reset(size_t numJobs) {
-        if (m_threads.empty()) return;
-        m_remainingJobs.store(numJobs, std::memory_order_relaxed);
-    }
-
-    void queueJob(std::function<void()> job) {
-        if (m_threads.empty()) {
-            job();
-        } else {
-            m_queue.enqueue(std::move(job));
-        }
-    }
-
-    void waitForJobs() const {
-        if (m_threads.empty()) return;
-        size_t current = m_remainingJobs;
-        while (current > 0) {
-            m_remainingJobs.wait(current, std::memory_order_acquire);
-            current = m_remainingJobs.load(std::memory_order_acquire);
-        }
-    }
-
-    void shutdown() {
-        // Queue null jobs to shut down threads
-        for (size_t i = 0; i < m_threads.size(); ++i) {
-            m_queue.enqueue(nullptr);
-        }
-        for (std::thread& thread : m_threads) thread.join();
-    }
-private:
-    void threadLoop() {
-        while (true) {
-            std::function<void()> job;
-            m_queue.wait_dequeue(job);
-            if (job == nullptr) return; // null job = shutdown signal
-            job();
-            if (m_remainingJobs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                m_remainingJobs.notify_one();
-            }
-        }
-    }
-    moodycamel::BlockingConcurrentQueue<std::function<void()>> m_queue;
-    std::atomic<size_t> m_remainingJobs;
-    std::vector<std::thread> m_threads;
-};
 
 class Timer {
 public:
@@ -597,7 +540,7 @@ std::string getBasePath(const BuilderOptions& opts, float scale, XXH64_hash_t ha
 
 void encodeAtlas(
     Atlas& atlas,
-    ThreadPool& threadPool,
+    BS::thread_pool<>& threadPool,
     const std::set<std::pair<TextureFormat, float>>& cachedFormats,
     const BuilderOptions& opts,
     XXH64_hash_t hash,
@@ -624,7 +567,7 @@ void encodeAtlas(
                 throw SpritesheetBuilderException(jsonPath + ": Failed to write JSON: " + glz::format_error(error));
             }
 
-            threadPool.queueJob([&subAtlas, &opts, format, filePath, argb, basisPool] {
+            threadPool.detach_task([&subAtlas, &opts, format, filePath, argb, basisPool] {
                 std::FILE* file = std::fopen(filePath.c_str(), "wb");
                 if (file == nullptr) {
                     throw SpritesheetBuilderException("Unable to write to file: " + filePath);
@@ -716,20 +659,17 @@ std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
     uint16_t numThreads = opts.multithreaded
         ? std::max(1u, std::thread::hardware_concurrency())
         : 1;
-    ThreadPool threadPool{numThreads};
+    BS::thread_pool threadPool{numThreads};
 
     // Phase 1: Load sprites, create a hash from all SVG files and paths
     Timer load{log};
     size_t numInputFiles = inputFiles.size();
     std::vector<Sprite> sprites{numInputFiles};
     auto hashes = std::make_unique_for_overwrite<XXH64_hash_t[]>(numInputFiles);
-    threadPool.reset(numInputFiles);
-    for (size_t i = 0; i < numInputFiles; ++i) {
-        threadPool.queueJob([&, i] {
-            loadSprite(inputFiles[i], sprites[i], hashes.get()[i]);
-        });
-    }
-    threadPool.waitForJobs();
+    threadPool.detach_sequence(0, numInputFiles, [&](size_t i) {
+        loadSprite(inputFiles[i], sprites[i], hashes.get()[i]);
+    });
+    threadPool.wait();
     XXH64_hash_t hash = XXH3_64bits(hashes.get(), numInputFiles * sizeof(XXH64_hash_t));
     load.stop(std::format("[spritesheetc] {} sprites loaded", numInputFiles));
 
@@ -787,13 +727,10 @@ std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
     // Phase 2: Parse sprites
     Timer parse{log};
     resvg_options* resvgOpts = resvg_options_create();
-    threadPool.reset(numInputFiles);
-    for (size_t i = 0; i < numInputFiles; ++i) {
-        threadPool.queueJob([&, i] {
-            parseSprite(inputFiles[i], sprites[i], resvgOpts, opts);
-        });
-    }
-    threadPool.waitForJobs();
+    threadPool.detach_sequence(0, numInputFiles, [&](size_t i) {
+        parseSprite(inputFiles[i], sprites[i], resvgOpts, opts);
+    });
+    threadPool.wait();
     resvg_options_destroy(resvgOpts);
     parse.stop(std::format("[spritesheetc] {} sprites parsed", numInputFiles));
 
@@ -806,16 +743,14 @@ std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
     // Phase 4: Render sprites to atlases + encode atlases
     Timer render{log};
     bool argb = opts.formats.size() == 1 && opts.formats.contains(TextureFormat::Webp);
-    size_t numEncodeJobs = atlases.size() * opts.formats.size() * opts.resolutions.size();
     std::unique_ptr<basisu::job_pool> basisPool;
     if (opts.formats.contains(TextureFormat::Ktx2)) {
         basisPool = std::make_unique<basisu::job_pool>(numThreads);
     }
     initUnpremulTable();
-    threadPool.reset(numInputFiles + numEncodeJobs);
     for (Atlas& atlas : atlases) {
         for (const Sprite& sprite : atlas.sprites) {
-            threadPool.queueJob([&] {
+            threadPool.detach_task([&] {
                 thread_local auto spriteBuffer = std::make_unique_for_overwrite<uint32_t[]>(spriteMaxW * spriteMaxH);
                 for (float scale : opts.resolutions) {
                     renderSprite(sprite, spriteBuffer, atlas.subAtlases[scale], scale, argb);
@@ -837,7 +772,7 @@ std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
             });
         }
     }
-    threadPool.waitForJobs();
+    threadPool.wait();
     render.stop(std::format("[spritesheetc] {} atlases written", atlases.size()));
 
     // Populate outputFiles and create cache file,

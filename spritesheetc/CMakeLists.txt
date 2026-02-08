@@ -16,19 +16,24 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/BinomialLLC/basis_universal.git
     GIT_SHALLOW TRUE
     EXCLUDE_FROM_ALL
+    SYSTEM
 )
 set(BASISU_EXAMPLES FALSE CACHE BOOL "" FORCE)
 set(BASISU_STATIC   TRUE  CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(basis_universal)
 target_include_directories(spritesheetc SYSTEM PRIVATE "${basis_universal_SOURCE_DIR}/encoder")
 
-# concurrentqueue
+# BS_thread_pool
 FetchContent_Declare(
-    concurrentqueue
-    GIT_REPOSITORY https://github.com/cameron314/concurrentqueue.git
+    bshoshany_thread_pool
+    GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
     GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
+    SYSTEM
 )
-FetchContent_MakeAvailable(concurrentqueue)
+FetchContent_MakeAvailable(bshoshany_thread_pool)
+add_library(BS_thread_pool INTERFACE)
+target_include_directories(BS_thread_pool INTERFACE ${bshoshany_thread_pool_SOURCE_DIR}/include)
 
 # glaze
 FetchContent_Declare(
@@ -138,7 +143,7 @@ add_subdirectory(
 
 target_link_libraries(spritesheetc PRIVATE
     basisu_encoder
-    concurrentqueue
+    BS_thread_pool
     glaze::glaze
     zlib-ng-static
     spng_static
