@@ -489,8 +489,24 @@ void encodeKtx2(SubAtlas& subAtlas, std::FILE* file, const BuilderOptions& opts,
     std::fwrite(output_ktx2.data(), 1, output_ktx2.size(), file);
 }
 
-void encodePng(SubAtlas& subAtlas, std::FILE* file) {
+void encodePng(SubAtlas& subAtlas, std::FILE* file, const BuilderOptions& opts) {
     spng_ctx* encoder = spng_ctx_new(SPNG_CTX_ENCODER);
+
+    uint8_t compressionLevel;
+    switch (opts.speed) {
+    case EncoderSpeed::Slow:
+        compressionLevel = 9;
+        break;
+    case EncoderSpeed::Medium:
+        compressionLevel = 5;
+        break;
+    case EncoderSpeed::Fast:
+        compressionLevel = 1;
+        break;
+    default:
+        std::unreachable();
+    }
+    spng_set_option(encoder, SPNG_IMG_COMPRESSION_LEVEL, compressionLevel);
 
     spng_ihdr ihdr = {
         .width = subAtlas.w,
@@ -581,7 +597,7 @@ void encodeAtlas(
                         encodeWebp(subAtlas, file, opts, argb);
                         break;
                     case TextureFormat::Png:
-                        encodePng(subAtlas, file);
+                        encodePng(subAtlas, file, opts);
                         break;
                 }
                 std::fclose(file);
