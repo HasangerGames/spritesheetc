@@ -769,6 +769,7 @@ std::vector<std::string> buildSpritesheets(const BuilderOptions& opts) {
     for (const std::filesystem::directory_entry& path : std::filesystem::directory_iterator(opts.outputDir)) {
         std::string filename = path.path().filename().string();
         if (filename.contains(hashStr)) continue; // skip files with current hash
+        if (path.is_directory()) continue;
         outputDirSize += path.file_size();
         if (!filename.ends_with(".cache")) continue;
         files.emplace(path.last_write_time(), path);
