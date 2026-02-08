@@ -35,8 +35,7 @@ public:
         if (m_threads.empty()) {
             job();
         } else {
-            thread_local moodycamel::ProducerToken token{m_queue};
-            m_queue.enqueue(token, std::move(job));
+            m_queue.enqueue(std::move(job));
         }
     }
 
@@ -60,8 +59,7 @@ private:
     void threadLoop() {
         while (true) {
             std::function<void()> job;
-            thread_local moodycamel::ConsumerToken token{m_queue};
-            m_queue.wait_dequeue(token, job);
+            m_queue.wait_dequeue(job);
             if (job == nullptr) return; // null job = shutdown signal
             job();
             if (m_remainingJobs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
