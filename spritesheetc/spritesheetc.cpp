@@ -608,6 +608,10 @@ void encodeAtlas(
 
 void readPath(const std::string& inputPath, std::vector<std::string>& files) {
     std::filesystem::path path{inputPath};
+    if (!std::filesystem::exists(path)) {
+        throw SpritesheetBuilderException("Not found: " + inputPath);
+    }
+
     std::string extension = path.extension().string();
     if (extension == ".svg") {
         files.emplace_back(inputPath);
