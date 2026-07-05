@@ -1,6 +1,6 @@
 {
   "name": "spritesheetc",
-  "version": "1.0.0-alpha4",
+  "version": "1.0.0-alpha5",
   "description": "Ridiculously fast spritesheet generator written in C++.",
   "main": "index.js",
   "bin": {
